@@ -86,7 +86,8 @@ with open(tokfile, "w") as f:
 
 procs = []
 try:
-    menv = {**os.environ, "X9_MOCK_ADDR": MOCK, "X9_MOCK_SPEED": "20", "X9_MOCK_FALLBACK_MODE": "HS_L1"}
+    menv = {**os.environ, "X9_MOCK_ADDR": MOCK, "X9_MOCK_SPEED": "20", "X9_MOCK_FALLBACK_MODE": "HS_L1",
+            "X9_MOCK_CANCEL_LINGER": "40"}  # a cancelled task stays listed 2 s
     if FIX:
         menv["X9_MOCK_FIXTURES"] = FIX
     procs.append(subprocess.Popen([f"{BIN}/x9-mock"], env=menv,
@@ -153,7 +154,9 @@ try:
     jf = wait_job(jf["job_id"], ("failed", "succeeded"))
     tasks = json.loads(urllib.request.urlopen(f"http://{MOCK}/api/v1/tasks").read())
     check("a request the scanner echoes differently is cancelled at once",
-          jf["state"] == "failed" and "did not accept" in jf["problem"].get("detail", "") and tasks == [], (jf, tasks))
+          jf["state"] == "failed" and "did not accept" in jf["problem"].get("detail", ""), jf)
+    check("the cancelled task stays listed for a while, exitResult none (as on a real X9)",
+          len(tasks) == 1 and tasks[0]["exitResult"] == "none", tasks)
     s, job = call("POST", "/scans", "agent", dome)
     check("agent scan waits for approval", s == 202 and job["state"] == "awaiting_approval", job)
     s, b = call("POST", f"/jobs/{job['job_id']}/approve", "agent")
@@ -170,6 +173,9 @@ try:
             break
         time.sleep(0.1)
     check("full-dome job succeeds", j["state"] == "succeeded" and j["result"]["scan_id"], j)
+    s, log = call("GET", f"/log?project_id={pid}", "viewer")
+    check("queued while the bridge's cancelled task lingered: waited instead of scanner_busy",
+          any("clear the cancelled task" in e["text"] and e["refs"].get("job_id") == job["job_id"] for e in log), [e["text"] for e in log])
     check("phases reported: leveling then sweeping", {"leveling", "sweeping"} <= seen_phases, seen_phases)
     station_scan = j["result"]["scan_id"]
     s, sc = call("GET", f"/scans/{station_scan}", "viewer")
@@ -264,11 +270,30 @@ try:
 
     s, job4 = call("POST", "/scans", "operator", {**dome, "color": True})
     check("operator scan is queued directly", s == 202 and job4["state"] == "queued", job4)
-    wait_job(job4["job_id"], ("running",))
-    time.sleep(0.6)
+    t0 = time.time()
+    while time.time() - t0 < 30:
+        _, j4 = call("GET", f"/jobs/{job4['job_id']}", "viewer")
+        if j4.get("phase") == "sweeping" or j4["state"] != "running" and j4["state"] != "queued":
+            break
+        time.sleep(0.05)
     s, b = call("POST", f"/jobs/{job4['job_id']}/cancel", "operator")
     j4 = wait_job(job4["job_id"], ("cancelled", "failed", "succeeded"))
-    check("running scan is cancelled and the scanner stopped", j4["state"] == "cancelled", j4)
+    check("scan cancelled mid-sweep reads cancelled at once", j4["state"] == "cancelled" and "partial_scan_id" not in j4, j4)
+    # Queued while the cancelled task is still listed.
+    s, job5 = call("POST", "/scans", "operator", dome)
+    t0 = time.time()
+    while time.time() - t0 < 15 and "partial_scan_id" not in j4:
+        time.sleep(0.2)
+        _, j4 = call("GET", f"/jobs/{job4['job_id']}", "viewer")
+    s, ps = call("GET", f"/scans/{j4.get('partial_scan_id')}", "viewer")
+    check("cancelled job points at the partial scan the scanner filed", s == 200 and 0 < ps["point_count"] < 6281859
+          and ps["project_id"] == pid and ps["created_at"], (j4, ps))
+    s, log = call("GET", f"/log?project_id={pid}", "viewer")
+    check("field log says the partial scan was kept", any(e["refs"].get("scan_id") == j4.get("partial_scan_id")
+          and "partial" in e["text"] for e in log), [e["text"] for e in log][-4:])
+    j5 = wait_job(job5["job_id"], ("succeeded", "failed", "cancelled"))
+    check("scan queued right after a cancel runs once the scanner clears", j5["state"] == "succeeded"
+          and j5["result"]["scan_id"] != j4.get("partial_scan_id"), j5)
     tasks = json.loads(urllib.request.urlopen(f"http://{MOCK}/api/v1/tasks").read())
     check("scanner has no task left", tasks == [], tasks)
 

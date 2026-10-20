@@ -40,7 +40,7 @@ the `/events` stream (server-sent events, whole objects, no re-fetch needed).
 | Not moved since the reference scan | `aim` | `instrument_moved` | Take a new preview scan at this station |
 | Confirmed delete | `DELETE` | `confirm_mismatch` / `forbidden` | Operator token + `X-Confirm: <id>` |
 | Known scan mode | scans | `invalid_request` | Use a name from `GET /scan-modes` |
-| Scanner idle (no other client's task) | a scan about to start | job fails `scanner_busy` | Wait for the other task, then queue again |
+| Scanner idle (no other client's task) | a scan about to start | job fails `scanner_busy` | Wait for the other task, then queue again. A task the bridge itself cancelled doesn't count: the job waits (up to 60 s) for the scanner to clear it |
 | Echo matches the request | a scan just started | job fails, scanner task cancelled | The scanner answers 202 even when it can't parse a request and runs a default full dome; any difference stops it at once |
 
 Rule settings are readable at `GET /rules` (admin can change them later; not in v1).
@@ -121,10 +121,10 @@ State is in memory and rebuilt from the scanner on restart.
 
 Testing: `cargo test -p x9-bridge` covers the rules, grants, aiming, recipe
 validation and placeholders, and time parsing. `crates/x9-bridge/tests/e2e.py
-target/release` runs 40 end-to-end checks against `x9-mock` (54 with
+target/release` runs 48 end-to-end checks against `x9-mock` (62 with
 `E2E_FIXTURES` pointing at real scans, for the file, aim, export and full
 recipe-run checks), which now simulates scans (phases, area scans, color,
-cancel, positional ids).
+cancel with a lingering task and a partial scan, positional ids).
 
 Run it against the mock:
 
@@ -148,7 +148,7 @@ operator token for approvals.
 | Grant (2 × STD_L2), two area scans by the agent | Both queued without asking, ran back to back: 102.4 s and 76.5 s; filed as area scans under station 1 |
 | Field log | Request, scanner start and geometry-ready entries recorded |
 
-Cancel on the real X9 (2026-10-20, field Pi over the scanner's Wi-Fi): `POST /jobs/{id}/cancel` during the sweep stopped the scanner; the job read `cancelled` within a second, while the scanner's own task took 13 s more to clear; a scan queued in that window fails with `scanner_busy` (it should wait instead). The scanner still files the partial sweep as a scan; the job does not point at it yet.
+Cancel on the real X9 (2026-10-20, field Pi over the scanner's Wi-Fi): `POST /jobs/{id}/cancel` during the sweep stopped the scanner; the job read `cancelled` within a second, while the scanner's own task took 13 s more to clear (exitResult stayed "none"). A scan queued in that window now waits for the task to clear. The scanner still files the partial sweep as a scan (69,552 points from 5 s of an HS_L1 dome); the cancelled job points at it as `partial_scan_id`, with a field-log entry, so a person can keep or delete it. The simulator does both.
 
 Found and fixed: approval / cancel / finish log entries lacked the project id;
 default port moved from 8790 (taken on the Fedora box) to 8795.

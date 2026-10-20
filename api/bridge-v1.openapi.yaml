@@ -282,6 +282,12 @@ paths:
       tags: [jobs]
       operationId: cancelJob
       summary: Cancel a queued or running job (stops the scanner if scanning).
+      description: >-
+        A running scan job reads `cancelled` at once. The scanner keeps its
+        task listed for a while after the stop (about 13 s on a real X9);
+        the next queued scan waits for it to clear instead of failing with
+        `scanner_busy`. If the scanner files what it had swept, the job gains
+        `partial_scan_id` and the field log says so; keep or delete that scan.
       responses:
         "200":
           description: Cancelled, or already finished.
@@ -878,6 +884,12 @@ components:
             - { $ref: "#/components/schemas/ExportRef" }
             - { $ref: "#/components/schemas/MeasurementRef" }
         problem: { $ref: "#/components/schemas/Problem" }
+        partial_scan_id:
+          type: string
+          description: >-
+            Cancelled scan jobs only: the scan the scanner filed from the
+            partial sweep. Set shortly after the cancel, once the scanner
+            files it (a `job` event announces the change).
 
     ScanRef:
       type: object

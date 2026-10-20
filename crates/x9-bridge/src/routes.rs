@@ -210,6 +210,7 @@ pub async fn submit_scan(st: &Arc<AppState>, c: &crate::model::Caller, req: Scan
             finished_at: None,
             result: None,
             problem: None,
+            partial_scan_id: None,
         };
         inner.jobs.push(JobRecord {
             job: job.clone(),
@@ -471,6 +472,7 @@ pub async fn submit_export(st: &Arc<AppState>, c: &crate::model::Caller, scan_id
         finished_at: None,
         result: None,
         problem: None,
+        partial_scan_id: None,
     };
     st.inner.lock().unwrap().jobs.push(JobRecord {
         job: job.clone(),

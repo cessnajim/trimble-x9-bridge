@@ -5,7 +5,9 @@
 //! Stateful: `POST /scans` starts a simulated scan that moves through the
 //! phases seen on a real X9 (initializing → running sweep → scan file appears →
 //! color imaging if requested → task clears), adds the scan to `/scans`, and can
-//! be stopped with `DELETE /tasks/{id}`.
+//! be stopped with `DELETE /tasks/{id}`. As on a real X9, a cancelled task
+//! stays listed in `/tasks` for a while (exitResult still "none"), and a scan
+//! cancelled during its sweep is still filed, with the points swept so far.
 //!
 //! Environment:
 //! - `X9_MOCK_ADDR` (default `127.0.0.1:34567`)
@@ -14,6 +16,8 @@
 //! - `X9_MOCK_ON_AC` `1` to report AC power, default 0
 //! - `X9_MOCK_FALLBACK_MODE` a scan mode whose requests are echoed (and run)
 //!   as a default color full dome, to test clients' echo checks
+//! - `X9_MOCK_CANCEL_LINGER` seconds a cancelled task stays listed, default 13
+//!   (scaled by the speed factor like every other duration)
 //! - `X9_MOCK_FIXTURES` directory with `dome.tzf`, `dome.jpg`, `area.tzf`,
 //!   `area.jpg`: served for full-dome and area scans' files and previews
 
@@ -31,7 +35,10 @@ struct Mock {
     projects: Vec<Value>,
     scans: Vec<Value>,
     task: Option<Value>,
+    /// Set while the current task is cancelled but still listed.
+    cancelled: Option<i64>,
     next_task_id: i64,
+    cancel_linger: f64,
     battery: u32,
     on_ac: bool,
     speed: f64,
@@ -51,7 +58,9 @@ async fn main() {
              "image": {"colorMode": "OFF", "downloaded": false, "file": "", "fileSize": 0, "id": 0, "nbImages": 0, "whiteBalanceMode": "mode_1"},
              "tzf": {"downloaded": true, "file": "mock_project/1.tzf", "fileSize": 102108747u64, "id": 0, "nbPoints": 24844238u64}})],
         task: None,
+        cancelled: None,
         next_task_id: 0,
+        cancel_linger: env("X9_MOCK_CANCEL_LINGER", "13").parse().unwrap_or(13.0),
         battery: env("X9_MOCK_BATTERY", "87").parse().unwrap_or(87),
         on_ac: env("X9_MOCK_ON_AC", "0") == "1",
         speed: env("X9_MOCK_SPEED", "10").parse().unwrap_or(10.0),
@@ -133,14 +142,65 @@ async fn tasks(State(m): State<Shared>) -> Json<Value> {
 }
 
 async fn cancel_task(State(m): State<Shared>, Path(id): Path<i64>) -> StatusCode {
-    let mut m = m.lock().unwrap();
-    match &m.task {
-        Some(t) if t["id"].as_i64() == Some(id) => {
-            m.task = None;
-            StatusCode::OK
+    let linger = {
+        let mut g = m.lock().unwrap();
+        if g.task.as_ref().and_then(|t| t["id"].as_i64()) != Some(id) {
+            return StatusCode::NOT_FOUND;
         }
-        _ => StatusCode::NOT_FOUND,
-    }
+        if g.cancelled == Some(id) {
+            return StatusCode::OK;
+        }
+        g.cancelled = Some(id);
+        g.cancel_linger / g.speed
+    };
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs_f64(linger)).await;
+        let mut g = m.lock().unwrap();
+        let Some(t) = g.task.clone().filter(|t| t["id"].as_i64() == Some(id)) else { return };
+        // Cancelled mid-sweep: the scanner files what it swept so far.
+        if t["state"] == "running" && t["file"] == "" {
+            let full = full_points(&t["scanRequest"]) as f64;
+            let frac = t["percentage"].as_f64().unwrap_or(0.0).max(0.01);
+            file_scan(&mut g, &t["scanRequest"], (full * frac) as u64);
+        }
+        g.task = None;
+        g.cancelled = None;
+    });
+    StatusCode::OK
+}
+
+fn full_points(req: &Value) -> u64 {
+    if req["scanType"] == "AreaScan" { 777_580 } else { 6_281_859 }
+}
+
+/// Add a scan to `/scans` the way the device names it; returns (file, scan id).
+fn file_scan(g: &mut Mock, req: &Value, points: u64) -> (String, usize) {
+    let area = req["scanType"] == "AreaScan";
+    let color = req["colorMode"] == "ON";
+    let project_name = req["projectName"].as_str().unwrap_or("mock_project").to_string();
+    let proj_idx = g.projects.iter().position(|p| p["projectName"] == project_name.as_str());
+    let station = proj_idx.map(|i| g.projects[i]["nextProjectScanID"].as_i64().unwrap_or(1)).unwrap_or(1);
+    let file = if area {
+        let parent = (station - 1).max(1);
+        let k = g.scans.iter()
+            .filter(|s| s["tzf"]["file"].as_str().unwrap_or("").starts_with(&format!("{project_name}/{parent}_")))
+            .count() + 1;
+        format!("{project_name}/{parent}_{k}.tzf")
+    } else {
+        if let Some(i) = proj_idx {
+            g.projects[i]["nextProjectScanID"] = json!(station + 1);
+        }
+        format!("{project_name}/{station}.tzf")
+    };
+    let n = g.scans.len();
+    let mode = req["scanMode"].as_str().unwrap_or("STD_L0").to_string();
+    let short = file.rsplit('/').next().unwrap_or("").to_string();
+    g.scans.push(json!({"id": n, "fastMode": !area, "scanMode": mode, "levelingStatus": "ok", "lockedScan": false,
+        "scanUUID": uuid::Uuid::new_v4().to_string(), "ppm": 0, "tzfId": n,
+        "parentScanUUID": "00000000-0000-0000-0000-000000000000",
+        "image": {"colorMode": if color { "ON" } else { "OFF" }, "downloaded": false, "file": "", "fileSize": 0, "id": n, "nbImages": if color { 30 } else { 0 }, "whiteBalanceMode": "mode_1"},
+        "tzf": {"downloaded": false, "file": file, "fileSize": points * 9, "id": n, "nbPoints": points}}));
+    (short, n)
 }
 
 async fn delete_scan(State(m): State<Shared>, Path(id): Path<i64>) -> StatusCode {
@@ -196,6 +256,9 @@ async fn simulate(m: Shared, task: Value) {
     // Returns false once the task was cancelled.
     let set = |f: &dyn Fn(&mut Value)| -> bool {
         let mut g = m.lock().unwrap();
+        if g.cancelled == Some(id) {
+            return false;
+        }
         match g.task.as_mut() {
             Some(t) if t["id"].as_i64() == Some(id) => {
                 f(t);
@@ -219,33 +282,10 @@ async fn simulate(m: Shared, task: Value) {
     wait(6.0).await;
     {
         let mut g = m.lock().unwrap();
-        if g.task.as_ref().and_then(|t| t["id"].as_i64()) != Some(id) {
+        if g.task.as_ref().and_then(|t| t["id"].as_i64()) != Some(id) || g.cancelled == Some(id) {
             return;
         }
-        let project_name = req["projectName"].as_str().unwrap_or("mock_project").to_string();
-        let proj_idx = g.projects.iter().position(|p| p["projectName"] == project_name.as_str());
-        let station = proj_idx.map(|i| g.projects[i]["nextProjectScanID"].as_i64().unwrap_or(1)).unwrap_or(1);
-        let file = if area {
-            let parent = (station - 1).max(1);
-            let k = g.scans.iter()
-                .filter(|s| s["tzf"]["file"].as_str().unwrap_or("").starts_with(&format!("{project_name}/{parent}_")))
-                .count() + 1;
-            format!("{project_name}/{parent}_{k}.tzf")
-        } else {
-            if let Some(i) = proj_idx {
-                g.projects[i]["nextProjectScanID"] = json!(station + 1);
-            }
-            format!("{project_name}/{station}.tzf")
-        };
-        let n = g.scans.len();
-        let points: u64 = if area { 777_580 } else { 6_281_859 };
-        let mode = req["scanMode"].as_str().unwrap_or("STD_L0").to_string();
-        let short = file.rsplit('/').next().unwrap_or("").to_string();
-        g.scans.push(json!({"id": n, "fastMode": !area, "scanMode": mode, "levelingStatus": "ok", "lockedScan": false,
-            "scanUUID": uuid::Uuid::new_v4().to_string(), "ppm": 0, "tzfId": n,
-            "parentScanUUID": "00000000-0000-0000-0000-000000000000",
-            "image": {"colorMode": if color { "ON" } else { "OFF" }, "downloaded": false, "file": "", "fileSize": 0, "id": n, "nbImages": if color { 30 } else { 0 }, "whiteBalanceMode": "mode_1"},
-            "tzf": {"downloaded": false, "file": file, "fileSize": points * 9, "id": n, "nbPoints": points}}));
+        let (short, n) = file_scan(&mut g, req, full_points(req));
         if let Some(t) = g.task.as_mut() {
             t["file"] = json!(short);
             t["scanID"] = json!(n);
@@ -261,7 +301,7 @@ async fn simulate(m: Shared, task: Value) {
     }
     wait(2.0).await;
     let mut g = m.lock().unwrap();
-    if g.task.as_ref().and_then(|t| t["id"].as_i64()) == Some(id) {
+    if g.task.as_ref().and_then(|t| t["id"].as_i64()) == Some(id) && g.cancelled != Some(id) {
         g.task = None;
     }
 }
@@ -289,4 +329,54 @@ async fn tzf_preview(State(m): State<Shared>, Path(id): Path<i64>) -> Result<([(
 
 async fn errors() -> Json<Value> {
     Json(json!([{"description": "", "errorLevel": "Information", "type": "NoError"}]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mock(task: Value) -> Shared {
+        Arc::new(Mutex::new(Mock {
+            projects: vec![json!({"id": 0, "nextProjectScanID": 1, "projectName": "p", "projectUUID": "u"})],
+            scans: vec![],
+            task: Some(task),
+            cancelled: None,
+            next_task_id: 1,
+            cancel_linger: 13.0,
+            battery: 87,
+            on_ac: false,
+            speed: 100.0,
+        }))
+    }
+
+    fn task(state: &str, pct: f64) -> Value {
+        json!({"id": 0, "type": "scan", "state": state, "percentage": pct, "exitResult": "none", "file": "",
+               "scanRequest": {"scanMode": "HS_L1", "scanType": "FullDome", "colorMode": "OFF", "projectName": "p"}})
+    }
+
+    #[tokio::test]
+    async fn cancelled_sweep_lingers_then_files_a_partial_scan() {
+        let m = mock(task("running", 0.5));
+        assert_eq!(cancel_task(State(m.clone()), Path(0)).await, StatusCode::OK);
+        // Still listed right after the cancel, and a new scan is refused.
+        assert!(m.lock().unwrap().task.is_some());
+        let (code, _) = launch_scan(State(m.clone()), Json(json!({"scanMode": "STD_L0"}))).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let g = m.lock().unwrap();
+        assert!(g.task.is_none());
+        assert_eq!(g.scans.len(), 1);
+        assert_eq!(g.scans[0]["tzf"]["file"], "p/1.tzf");
+        assert_eq!(g.scans[0]["tzf"]["nbPoints"], 6_281_859 / 2);
+    }
+
+    #[tokio::test]
+    async fn cancel_while_leveling_files_nothing() {
+        let m = mock(task("initializing", 0.0));
+        assert_eq!(cancel_task(State(m.clone()), Path(0)).await, StatusCode::OK);
+        assert_eq!(cancel_task(State(m.clone()), Path(9)).await, StatusCode::NOT_FOUND);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let g = m.lock().unwrap();
+        assert!(g.task.is_none() && g.scans.is_empty());
+    }
 }

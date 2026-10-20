@@ -7,7 +7,7 @@ use crate::rules::Snapshot;
 use crate::util::{new_id, now_rfc3339};
 use axum::http::HeaderMap;
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::{broadcast, Notify};
@@ -46,6 +46,8 @@ pub struct Inner {
     pub exports: HashMap<String, Value>,
     pub export_files: HashMap<String, std::path::PathBuf>,
     pub runs: HashMap<String, crate::runs::RunRecord>,
+    /// Scanner tasks the bridge cancelled that may still be listed in `/tasks`.
+    pub cancelled_tasks: HashSet<i64>,
 }
 
 pub struct AppState {

@@ -142,6 +142,9 @@ pub struct Job {
     pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub problem: Option<Value>,
+    /// Cancelled scan jobs: the scan the scanner filed from the partial sweep.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial_scan_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

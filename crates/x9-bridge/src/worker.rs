@@ -15,6 +15,8 @@ use x9_client::models;
 
 const MAX_SCAN: Duration = Duration::from_secs(45 * 60);
 const MAX_SCANNER_ERRORS: u32 = 10;
+/// How long a task the bridge cancelled may stay in `/tasks` (13 s on a real X9).
+const CANCEL_LINGER: Duration = Duration::from_secs(60);
 
 pub async fn run(st: Arc<AppState>) {
     loop {
@@ -95,6 +97,12 @@ async fn run_scan(st: &AppState, job_id: &str) {
     if let Err(e) = preflight(&st.rules, &snap) {
         return finish(st, job_id, JobState::Failed, None, Some(&e));
     }
+    match wait_idle(st, job_id, &req.project_id).await {
+        Idle::Ready => {}
+        Idle::Cancelled => return finish(st, job_id, JobState::Cancelled, None, None),
+        Idle::Failed(e) => return finish(st, job_id, JobState::Failed, None, Some(&e)),
+    }
+    // Taken after the wait: a cancelled scan's partial sweep may be filed during it.
     let before: HashSet<String> = match st.scanner.scans().await {
         Ok(s) => s.into_iter().filter_map(|s| s.scan_uuid).collect(),
         Err(e) => return finish(st, job_id, JobState::Failed, None, Some(&e.into())),
@@ -116,17 +124,6 @@ async fn run_scan(st: &AppState, job_id: &str) {
         delta_va: w.map(|w| w.delta_va),
         ..Default::default()
     };
-    // Another client (the vendor app, a script) may be driving the scanner.
-    match st.scanner.tasks().await {
-        Ok(t) if !t.is_empty() => {
-            let busy = ApiError::new(axum::http::StatusCode::CONFLICT, "scanner_busy", "The scanner is busy with another task")
-                .detail(format!("{} task(s) running", t.len()))
-                .hint("Wait for the other task to finish, then queue the scan again.");
-            return finish(st, job_id, JobState::Failed, None, Some(&busy));
-        }
-        Ok(_) => {}
-        Err(e) => return finish(st, job_id, JobState::Failed, None, Some(&e.into())),
-    }
     let t0 = Instant::now();
     let task = match st.scanner.launch_scan(&body).await {
         Ok(t) => t,
@@ -140,9 +137,9 @@ async fn run_scan(st: &AppState, job_id: &str) {
     let echo = task.scan_request.clone().unwrap_or_default();
     let diffs = echo_mismatch(&sent, &echo);
     if !diffs.is_empty() {
-        if let Some(id) = task_id {
-            let _ = st.scanner.cancel_task(id).await;
-        }
+        // Stopped before any sweep, so there's no partial scan to wait for;
+        // the next job waits out the lingering task in `wait_idle`.
+        cancel_task(st, task_id).await;
         let e = ApiError::conflict(format!("the scanner did not accept the request as sent ({}); its task was cancelled", diffs.join(", ")));
         return finish(st, job_id, JobState::Failed, None, Some(&e));
     }
@@ -222,10 +219,9 @@ async fn run_scan(st: &AppState, job_id: &str) {
         });
 
         if cancel {
-            if let Some(id) = task_id {
-                let _ = st.scanner.cancel_task(id).await;
-            }
-            return finish(st, job_id, JobState::Cancelled, None, None);
+            cancel_task(st, task_id).await;
+            finish(st, job_id, JobState::Cancelled, None, None);
+            return follow_cancelled(st, job_id, task_id, &before, new_scan, &req).await;
         }
 
         // Done once the scanner has been idle for a few polls with the file in
@@ -252,6 +248,134 @@ async fn run_scan(st: &AppState, job_id: &str) {
     };
     st.inner.lock().unwrap().scan_meta.insert(scan_id.clone(), ScanMeta { created_at, timings, window: req.window });
     finish(st, job_id, JobState::Succeeded, Some(serde_json::json!({"scan_id": scan_id})), None);
+}
+
+enum Idle {
+    Ready,
+    Cancelled,
+    Failed(ApiError),
+}
+
+#[derive(Debug, PartialEq)]
+enum Busy {
+    Idle,
+    /// Only tasks the bridge cancelled, which the scanner still lists.
+    Ours,
+    /// Tasks someone else started.
+    Other(usize),
+}
+
+fn busy(tasks: &[models::Task], ours: &HashSet<i64>) -> Busy {
+    let other = tasks.iter().filter(|t| !t.id.is_some_and(|id| ours.contains(&id))).count();
+    match (tasks.is_empty(), other) {
+        (true, _) => Busy::Idle,
+        (false, 0) => Busy::Ours,
+        (false, n) => Busy::Other(n),
+    }
+}
+
+fn scanner_busy(detail: String) -> ApiError {
+    ApiError::new(axum::http::StatusCode::CONFLICT, "scanner_busy", "The scanner is busy with another task")
+        .detail(detail)
+        .hint("Wait for the other task to finish, then queue the scan again.")
+}
+
+fn cancel_requested(st: &AppState, job_id: &str) -> bool {
+    st.inner.lock().unwrap().jobs.iter().find(|j| j.job.job_id == job_id).is_none_or(|j| j.cancel_requested)
+}
+
+/// Stop a scanner task and remember it was the bridge that did.
+async fn cancel_task(st: &AppState, task_id: Option<i64>) {
+    if let Some(id) = task_id {
+        st.inner.lock().unwrap().cancelled_tasks.insert(id);
+        let _ = st.scanner.cancel_task(id).await;
+    }
+}
+
+/// Wait until the scanner has no task. A task the bridge cancelled stays listed
+/// for a while after the cancel; wait that out (up to `CANCEL_LINGER`). Any
+/// other task means another client (the vendor app, a script) is driving the
+/// scanner: fail at once.
+async fn wait_idle(st: &AppState, job_id: &str, project_id: &str) -> Idle {
+    let t0 = Instant::now();
+    let mut logged = false;
+    loop {
+        let tasks = match st.scanner.tasks().await {
+            Ok(t) => t,
+            Err(e) => return Idle::Failed(e.into()),
+        };
+        let ours = st.inner.lock().unwrap().cancelled_tasks.clone();
+        match busy(&tasks, &ours) {
+            Busy::Idle => {
+                st.inner.lock().unwrap().cancelled_tasks.clear();
+                return Idle::Ready;
+            }
+            Busy::Other(n) => return Idle::Failed(scanner_busy(format!("{n} task(s) running"))),
+            Busy::Ours if t0.elapsed() >= CANCEL_LINGER => {
+                return Idle::Failed(scanner_busy(format!("a task the bridge cancelled is still listed after {} s", CANCEL_LINGER.as_secs())));
+            }
+            Busy::Ours => {
+                if !logged {
+                    st.log("scan", "Waiting for the scanner to clear the cancelled task", "bridge", Some(project_id), &[("job_id", job_id)]);
+                    logged = true;
+                }
+            }
+        }
+        if cancel_requested(st, job_id) {
+            return Idle::Cancelled;
+        }
+        tokio::time::sleep(st.poll).await;
+    }
+}
+
+/// After a cancel the scanner keeps the task listed for a while, and may still
+/// file what it had swept as a scan. Wait for that (up to `CANCEL_LINGER`) and
+/// point the job at it, so a person can keep or delete it. `known` is a scan
+/// already seen during the run.
+async fn follow_cancelled(st: &AppState, job_id: &str, task_id: Option<i64>, before: &HashSet<String>, known: Option<String>, req: &crate::model::ScanRequest) {
+    let t0 = Instant::now();
+    let mut gone_since: Option<Instant> = None;
+    let mut found: Option<models::Scan> = None;
+    while found.is_none() && t0.elapsed() < CANCEL_LINGER {
+        let (Ok(tasks), Ok(scans)) = (st.scanner.tasks().await, st.scanner.scans().await) else {
+            tokio::time::sleep(st.poll).await;
+            continue;
+        };
+        found = scans.into_iter().find(|s| match (&known, &s.scan_uuid) {
+            (Some(k), Some(u)) => k == u,
+            (None, Some(u)) => !before.contains(u),
+            _ => false,
+        });
+        if task_id.is_none_or(|id| !tasks.iter().any(|t| t.id == Some(id))) {
+            if let Some(id) = task_id {
+                st.inner.lock().unwrap().cancelled_tasks.remove(&id);
+            }
+            // The scan may be filed just after the task clears.
+            if gone_since.get_or_insert_with(Instant::now).elapsed() >= st.poll * 5 {
+                break;
+            }
+        }
+        if found.is_none() {
+            tokio::time::sleep(st.poll).await;
+        }
+    }
+    let Some(scan) = found else { return };
+    let Some(scan_id) = scan.scan_uuid.clone() else { return };
+    {
+        let mut inner = st.inner.lock().unwrap();
+        let created_at = inner.jobs.iter().find(|j| j.job.job_id == job_id).and_then(|j| j.job.started_at.clone()).unwrap_or_else(now_rfc3339);
+        inner.scan_meta.entry(scan_id.clone()).or_insert_with(|| ScanMeta { created_at, timings: Timings::default(), window: req.window });
+    }
+    update(st, job_id, |r| r.job.partial_scan_id = Some(scan_id.clone()));
+    let file = scan.tzf.as_ref().and_then(|t| t.file.clone()).unwrap_or_default();
+    let points = scan.tzf.as_ref().and_then(|t| t.nb_points).unwrap_or(0);
+    st.log(
+        "scan",
+        format!("The scanner kept a partial scan from cancelled job {job_id}: {file}, {points} points. Keep it or delete it."),
+        "bridge",
+        Some(&req.project_id),
+        &[("job_id", job_id), ("scan_id", &scan_id)],
+    );
 }
 
 /// Decode a scan into a point file. Runs alongside scans (it never touches the
@@ -328,8 +452,24 @@ pub fn echo_mismatch(sent: &serde_json::Value, echo: &serde_json::Value) -> Vec<
 
 #[cfg(test)]
 mod tests {
-    use super::echo_mismatch;
+    use super::{busy, echo_mismatch, Busy};
     use serde_json::json;
+    use std::collections::HashSet;
+    use x9_client::models::Task;
+
+    #[test]
+    fn busy_tells_our_cancelled_task_from_another_client() {
+        let task = |id: Option<i64>| Task { id, ..Default::default() };
+        let ours: HashSet<i64> = [4].into();
+        assert_eq!(busy(&[], &ours), Busy::Idle);
+        // The task we cancelled is still listed: wait for it.
+        assert_eq!(busy(&[task(Some(4))], &ours), Busy::Ours);
+        // Anything else is another client.
+        assert_eq!(busy(&[task(Some(5))], &ours), Busy::Other(1));
+        assert_eq!(busy(&[task(Some(4)), task(Some(5))], &ours), Busy::Other(1));
+        assert_eq!(busy(&[task(None)], &ours), Busy::Other(1));
+        assert_eq!(busy(&[task(Some(4))], &HashSet::new()), Busy::Other(1));
+    }
 
     #[test]
     fn echo_check() {
