@@ -1,0 +1,13 @@
+#!/bin/sh
+# Start x9-bridge against whichever link to the scanner answers: USB first
+# (faster), then the scanner's Wi-Fi. X9_BASE in the environment wins.
+# The link is chosen at start; systemd restarts the bridge if it exits.
+if [ -z "${X9_BASE:-}" ]; then
+  for B in http://192.168.42.1:34567/api/v1 http://192.168.43.1:34567/api/v1; do
+    if curl -s -m 2 -o /dev/null "$B/tasks"; then X9_BASE=$B; break; fi
+  done
+  X9_BASE="${X9_BASE:-http://192.168.42.1:34567/api/v1}"
+fi
+export X9_BASE
+export BRIDGE_TOKENS="${BRIDGE_TOKENS:-${CREDENTIALS_DIRECTORY:+$CREDENTIALS_DIRECTORY/tokens}}"
+exec "$(dirname "$0")/x9-bridge" "$@"

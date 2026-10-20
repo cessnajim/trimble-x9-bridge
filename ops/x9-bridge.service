@@ -1,0 +1,28 @@
+# systemd unit for the bridge. Install:
+#   sudo install -D -m 0755 x9-bridge ops/x9-bridge-run -t /opt/x9-bridge/
+#   sudo install -D -m 0600 tokens /etc/x9-bridge/tokens      # "name role token" per line
+#   sudo install -m 0644 ops/x9-bridge.service /etc/systemd/system/
+#   sudo systemctl enable --now x9-bridge
+# Optional overrides (X9_BASE, BRIDGE_ADDR, ...) go in /etc/x9-bridge/env.
+[Unit]
+Description=Trimble X9 bridge
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/opt/x9-bridge/x9-bridge-run
+EnvironmentFile=-/etc/x9-bridge/env
+LoadCredential=tokens:/etc/x9-bridge/tokens
+StateDirectory=x9-bridge
+Environment=BRIDGE_DATA=/var/lib/x9-bridge
+Restart=on-failure
+RestartSec=5
+DynamicUser=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

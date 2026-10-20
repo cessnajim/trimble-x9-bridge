@@ -1,0 +1,41 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install aarch64 cross toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+        run: cargo build --release --locked --target ${{ matrix.target }} -p x9-bridge -p x9-mock -p x9-cli
+      - name: Package
+        run: |
+          d=trimble-x9-bridge-${{ github.ref_name }}-${{ matrix.target }}
+          mkdir -p $d/ops
+          cp target/${{ matrix.target }}/release/{x9-bridge,x9-mock,x9} $d/
+          cp ops/x9-netctl ops/x9-bridge-run ops/x9-bridge.service ops/README.md $d/ops/
+          cp README.md PROVENANCE.md LICENSE $d/
+          tar -czf $d.tar.gz $d
+          sha256sum $d.tar.gz > $d.tar.gz.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            trimble-x9-bridge-*.tar.gz
+            trimble-x9-bridge-*.tar.gz.sha256

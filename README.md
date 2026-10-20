@@ -39,7 +39,13 @@ API: [api/bridge-v1.openapi.yaml](api/bridge-v1.openapi.yaml); design notes:
 | `crates/x9-client` | Client for the scanner's HTTP API |
 | `crates/x9-mock` | Scanner simulator: scans with realistic phases, area scans, cancel, failure modes |
 | `crates/x9-cli` | Small CLI over the client |
-| `ops/x9-netctl` | Privileged helper to bring the scanner's USB link up isolated (no default route, no DNS) |
+| `ops/` | systemd unit for the bridge, and `x9-netctl` to bring the scanner's USB link up isolated (no default route, no DNS) |
+
+## Install
+
+Release builds for Linux x86_64 and aarch64 (Raspberry Pi 4/5) are on the
+[releases page](https://github.com/cessnajim/trimble-x9-bridge/releases): each
+archive has `x9-bridge`, `x9-mock`, the `x9` CLI and `ops/` (the systemd unit and `x9-netctl`).
 
 ## Try it against the simulator
 
