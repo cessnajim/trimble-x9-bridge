@@ -23,6 +23,14 @@ answers, else the scanner's Wi-Fi (192.168.43.1). To pin one, or to change the
 listen address (default `127.0.0.1:8795`), put `X9_BASE=...` or
 `BRIDGE_ADDR=...` in `/etc/x9-bridge/env`.
 
+The link is chosen only at start. With NetworkManager, `90-x9-bridge`
+restarts the bridge whenever one of the scanner's connections comes up (set
+`X9_NM_CONNECTIONS` in the script to your profile names):
+
+```bash
+sudo install -m 0755 ops/90-x9-bridge /etc/NetworkManager/dispatcher.d/
+```
+
 ## `x9-netctl`
 
 A small privileged helper to bring the scanner's USB link up isolated (no

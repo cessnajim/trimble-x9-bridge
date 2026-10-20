@@ -1,0 +1,13 @@
+#!/bin/sh
+# NetworkManager dispatcher hook: restart x9-bridge when a link to the scanner
+# comes up, so x9-bridge-run picks it. Set X9_NM_CONNECTIONS to the names of
+# your NetworkManager profiles for the scanner's USB and Wi-Fi links.
+# Install: sudo install -m 0755 ops/90-x9-bridge /etc/NetworkManager/dispatcher.d/
+X9_NM_CONNECTIONS="${X9_NM_CONNECTIONS:-x9-usb x9-wifi}"
+[ "$2" = "up" ] || exit 0
+for c in $X9_NM_CONNECTIONS; do
+  if [ "$CONNECTION_ID" = "$c" ]; then
+    systemctl try-restart x9-bridge.service
+    exit 0
+  fi
+done
