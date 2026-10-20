@@ -22,7 +22,7 @@ trademarks of their respective owners.
   of scans (optionally limited to one recipe run). Deletes need an operator and
   an explicit confirmation.
 - **Aiming:** a box drawn on a scan's preview becomes an area-scan window.
-- **Exports:** levelled PLY / LAS via [trimble-tzf](https://github.com/cessnajim/trimble-tzf),
+- **Exports:** levelled PLY / LAS via [trimble-tzf](https://github.com/northidaholabs/trimble-tzf),
   with automatic checks (point count, levelled, coordinates).
 - **Recipes and runs:** TOML recipes of `action`, `person` and `check` steps;
   a run executes them under the starter's role.
@@ -54,7 +54,7 @@ trademarks of their respective owners.
 ## Install
 
 Release builds for Linux x86_64 and aarch64 (Raspberry Pi 4/5) are on the
-[releases page](https://github.com/cessnajim/trimble-x9-bridge/releases): each
+[releases page](https://github.com/northidaholabs/trimble-x9-bridge/releases): each
 archive has `x9-bridge`, `x9-mock`, the `x9` CLI and `ops/` (the systemd unit and `x9-netctl`).
 
 ## Try it against the simulator
@@ -83,7 +83,7 @@ exports and a full recipe run.
 
 ## Agents
 
-[TrimbleX9-mcp](https://github.com/cessnajim/TrimbleX9-mcp) has a bridge mode
+[TrimbleX9-mcp](https://github.com/northidaholabs/TrimbleX9-mcp) has a bridge mode
 (`SCANNER_BRIDGE_URL`, `SCANNER_BRIDGE_TOKEN`) that exposes this API as MCP
 tools, with previews returned as images and recipes as a prompt.
 

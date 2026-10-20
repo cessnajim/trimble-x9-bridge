@@ -46,7 +46,7 @@ two-team clean-room process.
 | `DELETE /tasks/{id}` stops a running task | Cancelled an HS_L1 full dome 5 s into the sweep (2026-10-20, over Wi-Fi): the sweep stopped at ~5 %, `/tasks` emptied 13 s later (`exitResult` stayed `none`), and the scanner still filed a scan record with the partial sweep (69,552 points, a valid `.tzf`) |
 
 The `.tzf` file format is handled by the separate
-[trimble-tzf](https://github.com/cessnajim/trimble-tzf) project, which has its
+[trimble-tzf](https://github.com/northidaholabs/trimble-tzf) project, which has its
 own provenance record.
 
 This describes the method; it is not legal advice.

@@ -44,7 +44,7 @@ not accept as sent.
 
 Tagged releases have archives for Linux `x86_64` and `aarch64` (Raspberry Pi
 4/5) on the
-[releases page](https://github.com/cessnajim/trimble-x9-bridge/releases).
+[releases page](https://github.com/northidaholabs/trimble-x9-bridge/releases).
 Each archive is named `trimble-x9-bridge-<tag>-<target>.tar.gz` and comes with
 a `.sha256` file. It contains:
 
@@ -58,8 +58,8 @@ a `.sha256` file. It contains:
 
 ```bash
 tag=v0.1.2; target=aarch64-unknown-linux-gnu
-curl -LO https://github.com/cessnajim/trimble-x9-bridge/releases/download/$tag/trimble-x9-bridge-$tag-$target.tar.gz
-curl -LO https://github.com/cessnajim/trimble-x9-bridge/releases/download/$tag/trimble-x9-bridge-$tag-$target.tar.gz.sha256
+curl -LO https://github.com/northidaholabs/trimble-x9-bridge/releases/download/$tag/trimble-x9-bridge-$tag-$target.tar.gz
+curl -LO https://github.com/northidaholabs/trimble-x9-bridge/releases/download/$tag/trimble-x9-bridge-$tag-$target.tar.gz.sha256
 sha256sum -c trimble-x9-bridge-$tag-$target.tar.gz.sha256
 tar xzf trimble-x9-bridge-$tag-$target.tar.gz
 ```
@@ -67,10 +67,10 @@ tar xzf trimble-x9-bridge-$tag-$target.tar.gz
 ### Build from source
 
 You need a stable Rust toolchain. The build fetches the public
-[trimble-tzf](https://github.com/cessnajim/trimble-tzf) decoder from GitHub.
+[trimble-tzf](https://github.com/northidaholabs/trimble-tzf) decoder from GitHub.
 
 ```bash
-git clone https://github.com/cessnajim/trimble-x9-bridge
+git clone https://github.com/northidaholabs/trimble-x9-bridge
 cd trimble-x9-bridge
 cargo build --release          # target/release/{x9-bridge,x9-mock,x9}
 ```
@@ -727,7 +727,7 @@ curl -s -H "$H" -OJ $B/scans/$SCAN/tzf          # saves <scan_id>.tzf
 The file is the scanner's own `.tzf`, unchanged. The bridge downloads it once
 and serves it from its cache afterwards, but only while the scanner still
 lists the scan: each request asks the scanner first. Decode it yourself with
-[trimble-tzf](https://github.com/cessnajim/trimble-tzf). A scan with no file
+[trimble-tzf](https://github.com/northidaholabs/trimble-tzf). A scan with no file
 is `404 not_found` ("No such scan file").
 
 ### Delete a scan

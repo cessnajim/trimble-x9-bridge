@@ -1346,7 +1346,7 @@ dependencies = [
 [[package]]
 name = "trimble-tzf"
 version = "0.1.0"
-source = "git+https://github.com/cessnajim/trimble-tzf?rev=2bd38dd#2bd38dd80e097b4fea0793d940f815a46e292fec"
+source = "git+https://github.com/northidaholabs/trimble-tzf?rev=2bd38dd#2bd38dd80e097b4fea0793d940f815a46e292fec"
 dependencies = [
  "flate2",
  "memmap2",
