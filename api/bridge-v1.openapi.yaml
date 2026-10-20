@@ -23,7 +23,12 @@ info:
       scanner's own scan UUID, because the scanner's numeric scan ids are
       positional and can change.
     - Errors use `application/problem+json` (RFC 9457) with a machine-readable
-      `code`.
+      `code` (see `docs/errors.md`).
+
+    Implementation status: paths, parameters, fields and values marked
+    `x-status: planned` are part of the design but not implemented by the
+    bridge yet. Planned paths answer `404` with an empty body. Everything
+    else is implemented. User guide: `docs/guide.md`.
 servers:
   - url: http://localhost:8795/v1
     description: Bridge on this machine
@@ -121,7 +126,11 @@ paths:
     post:
       tags: [projects]
       operationId: createProject
-      summary: Create a project on the scanner.
+      summary: Create a project on the scanner (agent, operator, admin).
+      description: |
+        The bridge generates the project UUID. `name` is trimmed and must be
+        1–64 bytes with no `/`. A name the scanner already has is
+        `409 conflict`.
       requestBody:
         required: true
         content:
@@ -130,7 +139,7 @@ paths:
               type: object
               required: [name]
               properties:
-                name: { type: string, minLength: 1, maxLength: 64 }
+                name: { type: string, minLength: 1, maxLength: 64, pattern: "^[^/]+$" }
       responses:
         "201":
           description: Created.
@@ -159,9 +168,12 @@ paths:
       operationId: startScan
       summary: Queue a full-dome or area scan.
       description: |
-        Admission runs every rule. A request no rule blocks is queued; one that
-        needs a person's approval is queued as `awaiting_approval` unless an
-        active grant covers it.
+        Admission runs every rule. A request no rule blocks is queued; a scan
+        from an `agent` token is held as `awaiting_approval` unless an active
+        grant covers it. `viewer` tokens are refused. Right before the scanner
+        starts, the worker checks connection, battery and storage again, and
+        that the scanner is idle (a task the bridge cancelled itself is waited
+        out, up to 60 s).
       requestBody:
         required: true
         content:
@@ -191,6 +203,10 @@ paths:
       tags: [scans]
       operationId: deleteScan
       summary: Delete a scan from the scanner (operator only, confirmed).
+      description: |
+        Needs an `operator` or `admin` token (`403 forbidden`) and an
+        `X-Confirm` header equal to `scan_id` (`412 confirm_mismatch`). The
+        bridge's cached copy of the scan file and preview is kept.
       parameters: [{ $ref: "#/components/parameters/Confirm" }]
       responses:
         "204": { description: Deleted. }
@@ -230,8 +246,9 @@ paths:
       operationId: aimFromPreview
       summary: Turn a box drawn on a scan's preview into an area-scan window.
       description: |
-        Valid only while the scanner has not moved since `reference_scan_id`
-        was taken; otherwise the response is `409 instrument_moved`.
+        Refused with `409 instrument_moved` while the scanner reports it moved
+        since its last scan (the scanner's own flag; the check is skipped when
+        the scanner does not answer). Any role may call it; it only computes.
       requestBody:
         required: true
         content:
@@ -252,10 +269,12 @@ paths:
       parameters:
         - name: state
           in: query
+          x-status: planned
+          description: Planned; not implemented. The bridge ignores it and returns every job.
           schema: { $ref: "#/components/schemas/JobState" }
       responses:
         "200":
-          description: Jobs, newest first.
+          description: Every job since the bridge started, newest first.
           content:
             application/json:
               schema:
@@ -288,9 +307,14 @@ paths:
         the next queued scan waits for it to clear instead of failing with
         `scanner_busy`. If the scanner files what it had swept, the job gains
         `partial_scan_id` and the field log says so; keep or delete that scan.
+        A `queued` or `awaiting_approval` job is cancelled at once; for a
+        running scan the answer may still read `running` until the worker's
+        next poll. Export jobs cannot be stopped: the request is accepted and
+        the export runs to the end. `agent` tokens may cancel only jobs they
+        requested.
       responses:
         "200":
-          description: Cancelled, or already finished.
+          description: The job (cancelled, cancelling, or unchanged if already finished).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
@@ -316,7 +340,7 @@ paths:
       operationId: listGrants
       responses:
         "200":
-          description: Active grants.
+          description: Grants that have not expired, including used-up ones.
           content:
             application/json:
               schema:
@@ -328,9 +352,11 @@ paths:
       operationId: createGrant
       summary: Let jobs inside a scope run without asking each time (operator only).
       description: |
-        A grant covers scans and processing within its limits, for example
-        "up to 12 scans in project P for the next 2 hours". It never covers
-        deletes.
+        A grant lets `agent` scans within its limits queue without approval,
+        for example "up to 12 scans in project P for the next 2 hours".
+        Exports need no approval, so grants cover scans only. A grant never
+        covers deletes. `scans_used` counts scans queued under it and is not
+        given back when a job fails or is cancelled.
       requestBody:
         required: true
         content:
@@ -402,11 +428,14 @@ paths:
         default: { $ref: "#/components/responses/Problem" }
 
   /scans/{scan_id}/measurements:
+    x-status: planned
     parameters: [{ $ref: "#/components/parameters/ScanId" }]
     post:
       tags: [products]
       operationId: measure
+      x-status: planned
       summary: Measure a feature in a scan (runs in the measurement worker).
+      description: Planned; not implemented. The measurement worker is not built yet.
       requestBody:
         required: true
         content:
@@ -421,11 +450,14 @@ paths:
         default: { $ref: "#/components/responses/Problem" }
 
   /measurements/{measurement_id}:
+    x-status: planned
     parameters:
       - { name: measurement_id, in: path, required: true, schema: { type: string } }
     get:
       tags: [products]
       operationId: getMeasurement
+      x-status: planned
+      description: Planned; not implemented.
       responses:
         "200":
           description: Values, uncertainties, checks and the evidence image.
@@ -435,12 +467,15 @@ paths:
         default: { $ref: "#/components/responses/Problem" }
 
   /measurements/{measurement_id}/evidence:
+    x-status: planned
     parameters:
       - { name: measurement_id, in: path, required: true, schema: { type: string } }
     get:
       tags: [products]
       operationId: getMeasurementEvidence
+      x-status: planned
       summary: The annotated check image for a person or a vision model to verify.
+      description: Planned; not implemented.
       responses:
         "200":
           description: PNG.
@@ -493,7 +528,12 @@ paths:
     post:
       tags: [recipes]
       operationId: startRun
-      summary: Start running a recipe.
+      summary: Start running a recipe (agent, operator, admin).
+      description: |
+        The run executes under the starter's role and name, so approvals and
+        grants apply as for direct requests. Every declared input is
+        required; inputs with `choices` must be one of them. See
+        `docs/recipes.md`.
       requestBody:
         required: true
         content:
@@ -574,8 +614,9 @@ paths:
       tags: [log]
       operationId: getLog
       summary: The field log, oldest first.
+      description: In memory; it starts empty when the bridge starts.
       parameters:
-        - { name: since, in: query, schema: { type: string, format: date-time } }
+        - { name: since, in: query, description: Entries at or after this time., schema: { type: string, format: date-time } }
         - { name: project_id, in: query, schema: { type: string } }
       responses:
         "200":
@@ -598,7 +639,7 @@ paths:
               type: object
               required: [text]
               properties:
-                text: { type: string, maxLength: 4000 }
+                text: { type: string, minLength: 1, maxLength: 4000, description: Not only spaces. }
                 project_id: { type: string }
       responses:
         "201":
@@ -616,9 +657,13 @@ paths:
       responses:
         "200":
           description: |
-            `text/event-stream`. Event types: `job`, `status`, `log`. Each
-            event's data is the full JSON object (`Job`, `Status` or
-            `LogEntry`), so a client never needs to re-fetch.
+            `text/event-stream`. Event types: `job` (data: a `Job`), `run`
+            (data: a `Run`) and `log` (data: a `LogEntry`). Each event's data
+            is the full JSON object on one line, so a client never needs to
+            re-fetch. `job` events are also sent on every scanner poll while a
+            scan runs. Events are not replayed; a client more than 256 events
+            behind skips the missed ones. A `status` event is planned
+            (`x-status: planned`); poll `GET /status` for now.
           content:
             text/event-stream:
               schema: { type: string }
@@ -630,10 +675,13 @@ components:
       type: http
       scheme: bearer
       description: |
-        One token per user or device. Each token has a role: `viewer` (read
-        only), `agent` (read, queue work; scans need approval or a grant),
-        `operator` (everything an agent can, plus approvals, grants and
-        confirmed deletes) or `admin` (also rule settings and tokens).
+        One token per user or device, from the bridge's token file. Each token
+        has a role: `viewer` (read only, plus `POST /aim`), `agent` (read,
+        queue work; scans need approval or a grant; cancel only its own jobs),
+        `operator` (everything an agent can, plus approvals, grants, cancelling
+        any job and confirmed deletes) or `admin`. In this version `admin` has
+        exactly the rights of `operator`; changing rule settings and tokens
+        over the API is planned.
 
   parameters:
     ScanId:
@@ -676,6 +724,11 @@ components:
         detail: { type: string }
         code:
           type: string
+          description: |
+            See `docs/errors.md`. `needs_approval` and `worker_unavailable` are
+            planned and never returned in this version. `conflict` is also used
+            with status 502 when the scanner answers a request with an error
+            status other than 409.
           enum:
             - unauthorized
             - forbidden
@@ -706,17 +759,22 @@ components:
           properties:
             version: { type: string }
             started_at: { type: string, format: date-time }
-            queue_length: { type: integer }
+            queue_length:
+              type: integer
+              description: Scan jobs `queued` or `awaiting_approval`.
             worker_ready:
               type: boolean
-              description: Whether the measurement worker is available.
+              description: Whether the measurement worker is available. Always `false` in this version.
         scanner:
           type: object
           required: [connected]
+          description: When `connected` is false, the other fields are absent.
           properties:
             connected: { type: boolean }
-            busy: { type: boolean }
-            current_job_id: { type: [string, "null"] }
+            busy: { type: boolean, description: The scanner reports a current task (from any client). }
+            current_job_id:
+              type: [string, "null"]
+              description: The bridge's job in state `running` (a scan, or an export, which also runs).
             battery_pct: { type: integer, minimum: 0, maximum: 100 }
             on_ac_power: { type: boolean }
             storage_free_bytes: { type: integer }
@@ -724,7 +782,10 @@ components:
             leveling:
               type: object
               properties:
-                state: { type: string, enum: [none, in_progress, ok, error] }
+                state:
+                  type: string
+                  enum: [none, in_progress, ok, error]
+                  description: "`in_progress` stands for any value the scanner reports other than ok, none and error."
                 compensator_on: { type: boolean }
                 tilt_rad:
                   type: array
@@ -763,11 +824,13 @@ components:
       properties:
         project_id: { type: string }
         name: { type: string }
-        scan_count: { type: integer }
+        scan_count:
+          type: integer
+          description: Stations (full-dome scans) the scanner has numbered in the project; area scans are not counted.
 
     Window:
       type: object
-      description: An area-scan window. `delta_ha` may cross 2π.
+      description: An area-scan window. `start_ha + delta_ha` may exceed 2π (the window crosses the seam). `start_va + delta_va` must not exceed π.
       required: [start_ha, delta_ha, start_va, delta_va]
       properties:
         start_ha: { type: number, minimum: 0, exclusiveMaximum: 6.283185307179586 }
@@ -788,7 +851,7 @@ components:
           description: Camera images after the sweep. Adds ~150 s; off by default.
         window:
           $ref: "#/components/schemas/Window"
-          description: Required when `kind` is `area`.
+          description: Required when `kind` is `area`; refused for `full_dome`.
         note: { type: string, description: Recorded in the field log. }
 
     Scan:
@@ -804,13 +867,17 @@ components:
         kind: { type: string, enum: [full_dome, area] }
         mode: { type: string }
         color: { type: boolean }
-        window: { $ref: "#/components/schemas/Window" }
+        window:
+          $ref: "#/components/schemas/Window"
+          description: Area scans the bridge ran since it started.
         created_at:
           type: [string, "null"]
           format: date-time
-          description: Known only for scans the bridge ran; the scanner doesn't record it.
+          description: Known only for scans this bridge ran since it started (when the job started); the scanner doesn't record it.
         grid:
           type: object
+          x-status: planned
+          description: Planned; not returned yet.
           properties:
             rows: { type: integer }
             cols: { type: integer }
@@ -818,10 +885,14 @@ components:
         tzf_bytes: { type: integer }
         has_intensity:
           type: boolean
-          description: Whether the scan file itself carries intensity (otherwise the preview supplies it).
+          x-status: planned
+          description: Planned; not returned yet. Whether the scan file itself carries intensity (otherwise the preview supplies it).
         timings:
           type: object
-          description: Seconds from queueing, as observed.
+          description: >-
+            Seconds from when the bridge sent the scan to the scanner, as
+            observed. Only for scans this bridge ran since it started; empty
+            for a partial scan from a cancelled job.
           properties:
             leveling_s: { type: number }
             sweep_s: { type: number }
@@ -844,16 +915,29 @@ components:
             y0: { type: integer, minimum: 0 }
             x1: { type: integer, minimum: 0 }
             y1: { type: integer, minimum: 0 }
-        margin_rad: { type: number, default: 0.009, minimum: 0 }
+        margin_rad: { type: number, default: 0.009, description: Padding on every side, radians. Negative values count as 0. }
 
     AimResult:
       type: object
-      required: [window]
+      required: [window, preview_size, cells_per_pixel]
       properties:
         window: { $ref: "#/components/schemas/Window" }
+        preview_size:
+          type: array
+          description: Width and height of the reference preview, pixels.
+          items: { type: integer }
+          minItems: 2
+          maxItems: 2
+        cells_per_pixel:
+          type: array
+          description: Scan grid cells per preview pixel, horizontal and vertical.
+          items: { type: number }
+          minItems: 2
+          maxItems: 2
         estimated_seconds:
           type: object
-          description: Predicted time per mode, from the mode's fixed and sweep figures.
+          x-status: planned
+          description: Planned; not returned yet. Predicted time per mode, from the mode's fixed and sweep figures.
           additionalProperties: { type: number }
 
     JobState:
@@ -865,13 +949,23 @@ components:
       required: [job_id, kind, state, created_at]
       properties:
         job_id: { type: string }
-        kind: { type: string, enum: [scan, export, measurement] }
+        kind:
+          type: string
+          enum: [scan, export, measurement]
+          description: "`measurement` is planned (`x-status: planned`)."
         state: { $ref: "#/components/schemas/JobState" }
         phase:
           type: string
-          description: For scans.
+          description: >-
+            Scans: `leveling` (also while waiting for the scanner to clear a
+            task the bridge cancelled), `sweeping`, `imaging` (color only).
+            Exports: `downloading`, `decoding`. Absent once the job finishes.
           enum: [leveling, sweeping, imaging, downloading, decoding]
-        progress: { type: number, minimum: 0, maximum: 1 }
+        progress:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: The scanner's task percentage (restarts during color imaging); 1 when a job succeeds.
         requested_by: { type: string, description: Token name. }
         run_id: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
@@ -901,6 +995,7 @@ components:
       properties: { export_id: { type: string } }
     MeasurementRef:
       type: object
+      x-status: planned
       required: [measurement_id]
       properties: { measurement_id: { type: string } }
 
@@ -908,16 +1003,17 @@ components:
       type: object
       required: [project_id, expires_at]
       properties:
-        project_id: { type: string }
-        expires_at: { type: string, format: date-time }
-        max_scans: { type: integer, minimum: 1 }
+        project_id: { type: string, description: Not checked against the scanner. }
+        expires_at: { type: string, format: date-time, description: Must be in the future. }
+        max_scans: { type: [integer, "null"], minimum: 0, description: Omitted or null for no limit. }
         allowed_modes:
           type: array
+          description: Empty for any mode.
           items: { type: string }
         allow_color: { type: boolean, default: false }
         run_id:
-          type: string
-          description: Limit the grant to one recipe run.
+          type: [string, "null"]
+          description: Limit the grant to one recipe run. Not checked against existing runs.
 
     Grant:
       allOf:
@@ -936,10 +1032,14 @@ components:
       properties:
         name:
           type: string
-          examples: [point_count, levelled, plane_flatness, plumb, level]
+          description: Exports produce `point_count`, `levelled`, `coordinates` and `intensity` (always ok).
+          examples: [point_count, levelled, coordinates, intensity]
         ok: { type: boolean }
         value: { type: number }
-        threshold: { type: number }
+        threshold:
+          type: number
+          x-status: planned
+          description: Planned; not returned yet.
         unit: { type: string }
         detail: { type: string }
 
@@ -952,7 +1052,11 @@ components:
           type: string
           enum: [auto, scan, preview, none]
           default: auto
-          description: "`auto` uses the scan's own intensity when present, else the preview."
+          description: >-
+            The scan file's own intensity is not decoded yet: `auto` and `scan`
+            use the scan's preview when it can be downloaded, else mid-grey.
+            `preview` fails the export (`decode_failed`) without a preview.
+            `none` writes mid-grey. Points are always levelled.
 
     Export:
       type: object
@@ -974,6 +1078,7 @@ components:
 
     MeasurementRequest:
       type: object
+      x-status: planned
       required: [kind]
       properties:
         kind:
@@ -1001,6 +1106,7 @@ components:
 
     Measurement:
       type: object
+      x-status: planned
       required: [measurement_id, scan_id, kind, values, checks, evidence_url]
       properties:
         measurement_id: { type: string }
@@ -1047,7 +1153,10 @@ components:
                 required: [name, type]
                 properties:
                   name: { type: string }
-                  type: { type: string, enum: [string, number, boolean, choice] }
+                  type:
+                    type: string
+                    description: A hint for clients; the bridge does not check it.
+                    examples: [string, number, boolean, choice]
                   choices: { type: array, items: { type: string } }
                   prompt: { type: string }
             steps:
@@ -1066,11 +1175,16 @@ components:
         kind: { type: string, enum: [action, person, check] }
         operation_id:
           type: string
+          enum: [startScan, aimFromPreview, exportPoints, addLogNote]
           description: For `action` steps, the API operation to call.
         arguments:
           type: object
           additionalProperties: true
-          description: Fixed arguments; `{{input.name}}` and `{{steps.<id>.result}}` placeholders allowed.
+          description: >-
+            Fixed arguments. Strings may hold `{{project_id}}`,
+            `{{input.<name>}}` and `{{steps.<id>.<field>…}}` placeholders; a
+            string that is exactly one placeholder takes the referenced
+            value's type. See `docs/recipes.md`.
         instructions: { type: string, description: What to tell the person, for `person` steps. }
         needs:
           type: array
@@ -1090,7 +1204,10 @@ components:
         run_id: { type: string }
         recipe_id: { type: string }
         project_id: { type: string }
-        state: { type: string, enum: [running, waiting_for_person, succeeded, failed, cancelled] }
+        state:
+          type: string
+          enum: [running, waiting_for_person, succeeded, failed, cancelled]
+          description: "`waiting_for_person` covers both an approval and a person step; see `waiting_for`."
         waiting_for:
           type: [string, "null"]
           enum: [approval, input, null]
@@ -1125,4 +1242,4 @@ components:
         refs:
           type: object
           additionalProperties: { type: string }
-          description: Related ids (job_id, scan_id, run_id).
+          description: Related ids (job_id, scan_id, run_id, step_id, grant_id, export_id).

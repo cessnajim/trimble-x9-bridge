@@ -28,8 +28,18 @@ trademarks of their respective owners.
   a run executes them under the starter's role.
 - **Field log** and a live event stream.
 
-API: [api/bridge-v1.openapi.yaml](api/bridge-v1.openapi.yaml); design notes:
-[docs/bridge-api-v1.md](docs/bridge-api-v1.md).
+## Documentation
+
+| Document | What |
+| --- | --- |
+| [docs/guide.md](docs/guide.md) | Install, configuration, tokens and roles, and every workflow with `curl` examples: scans, approvals, grants, cancel, aiming, exports, deletes, field log, events |
+| [docs/recipes.md](docs/recipes.md) | Recipe format v0 and how runs execute |
+| [docs/errors.md](docs/errors.md) | Every error `code`, its HTTP status, when it happens and its hint |
+| [docs/tools.md](docs/tools.md) | The `x9` CLI, the `x9-mock` simulator, and the tests |
+| [api/bridge-v1.openapi.yaml](api/bridge-v1.openapi.yaml) | The API spec (OpenAPI 3.1; planned parts marked `x-status: planned`) |
+| [docs/bridge-api-v1.md](docs/bridge-api-v1.md) | Design notes and what was tested on a real X9 |
+| [ops/README.md](ops/README.md) | Running the bridge as a systemd service; the USB link helper |
+| [PROVENANCE.md](PROVENANCE.md) | How the scanner API knowledge was obtained |
 
 ## Layout
 

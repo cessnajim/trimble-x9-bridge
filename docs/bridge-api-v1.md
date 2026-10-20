@@ -1,5 +1,9 @@
 # Bridge API v1 — design notes
 
+> These are the design notes and test history. To install and use the bridge,
+> start with the [guide](guide.md); see also [recipes](recipes.md),
+> [errors](errors.md) and [tools](tools.md).
+
 Status: **draft 2** (2026-10-20); skeleton implemented in `crates/x9-bridge`. Spec: [`api/bridge-v1.openapi.yaml`](../api/bridge-v1.openapi.yaml).
 
 The bridge service is the only thing that talks to the scanner. Every client
@@ -131,7 +135,7 @@ Run it against the mock:
 ```bash
 cargo build --release -p x9-mock -p x9-bridge
 X9_MOCK_ADDR=127.0.0.1:34599 target/release/x9-mock &
-printf 'jim operator %s\n' "$(openssl rand -hex 16)" > tokens
+printf 'me operator %s\n' "$(openssl rand -hex 16)" > tokens
 X9_BASE=http://127.0.0.1:34599/api/v1 BRIDGE_TOKENS=tokens target/release/x9-bridge
 ```
 
