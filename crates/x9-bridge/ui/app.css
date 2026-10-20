@@ -171,14 +171,16 @@ input:focus, select:focus, textarea:focus, .btn:focus-visible, a:focus-visible {
 
 /* Panorama with box drawing */
 .pano { overflow-x: auto; overflow-y: hidden; border-radius: 12px; background: #000; -webkit-overflow-scrolling: touch; }
-.pano-in { position: relative; display: inline-block; vertical-align: top; touch-action: pan-x; user-select: none; -webkit-user-select: none; }
+.pano-in { position: relative; display: inline-block; vertical-align: top; white-space: nowrap; line-height: 0; touch-action: pan-x; user-select: none; -webkit-user-select: none; }
 .pano-in.draw { touch-action: none; cursor: crosshair; }
-.pano img { display: block; height: min(46vh, 340px); width: auto; max-width: none; -webkit-user-drag: none; pointer-events: none; }
+.pano img { display: inline-block; vertical-align: top; height: min(46vh, 340px); width: auto; max-width: none; -webkit-user-drag: none; pointer-events: none; }
 .boxsel { position: absolute; border: 3px solid #facc15; background: rgba(250, 204, 21, 0.18); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6); pointer-events: none; }
 .pano-tools { display: flex; align-items: center; gap: 8px; margin: 10px 0; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
 .seg button { min-height: 40px; padding: 0 14px; border: 0; background: var(--card); font-weight: 650; }
 .seg button.on { background: var(--accent); color: var(--accent-ink); }
+.card.status { min-height: 196px; }
+.pano img.seam { opacity: 0.8; border-left: 2px dashed #facc15; }
 .placeholder { height: min(46vh, 340px); display: grid; place-items: center; color: #94a3b8; background: #0b1220; border-radius: 12px; }
 
 /* Log */

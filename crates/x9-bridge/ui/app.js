@@ -33,6 +33,7 @@ const S = {
   modes: [],
   log: [],
   scans: [],
+  scanById: {},    // every scan seen, so a link to a scan in another project still opens
   project: store.get("x9.project"),
   previews: new Map(), // scan_id -> object URL | "loading" | {error}
   dims: {},        // scan_id -> [w, h]
@@ -73,6 +74,7 @@ function elapsed(iso) {
   const s = Math.max(0, Math.round((Date.now() - new Date(iso)) / 1000));
   return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${s % 60} s`;
 }
+const span = (b, w) => (b.x1 >= b.x0 ? b.x1 - b.x0 : b.x1 + w - b.x0);
 const gb = (b) => (b == null ? "–" : `${(b / 1e9).toFixed(1)} GB`);
 const num = (n) => (n == null ? "–" : Number(n).toLocaleString());
 
@@ -180,6 +182,7 @@ async function load(what) {
       case "log": S.log = (await api("/log")).reverse(); break;
       case "scans":
         S.scans = S.project ? await api(`/scans?project_id=${encodeURIComponent(S.project)}`) : [];
+        for (const sc of S.scans) S.scanById[sc.scan_id] = sc;
         break;
     }
   } catch (e) {
@@ -393,7 +396,7 @@ function jobCard(j, { actions = true } = {}) {
 function viewNow() {
   const st = S.status;
   let scanner;
-  if (!st) scanner = `<div class="card"><p class="meta">Reading the scanner…</p></div>`;
+  if (!st) scanner = `<div class="card status"><p class="meta">Reading the scanner…</p></div>`;
   else if (st.error) scanner = `<div class="card"><div class="problem">${esc(st.error)}</div></div>`;
   else {
     const s = st.scanner || {};
@@ -404,7 +407,7 @@ function viewNow() {
       const batt = s.battery_pct ?? null;
       const battCls = batt == null ? "" : batt < 15 ? "bad" : batt < 30 ? "warn" : "ok";
       const lev = s.leveling?.state ?? "–";
-      scanner = `<div class="card">
+      scanner = `<div class="card status">
         <div class="line"><div class="battery"><span class="pct ${battCls}">${batt ?? "–"}%</span><span class="meta">${s.on_ac_power ? "on power" : "battery"}</span></div>
         ${s.busy || S.jobs.some((j) => j.kind === "scan" && j.state === "running") ? `<span class="chip info">busy</span>` : `<span class="chip good">ready</span>`}</div>
         <div class="bar"><i style="width:${batt ?? 0}%"></i></div>
@@ -478,7 +481,7 @@ function stepOutput(rs, def) {
   if (def?.kind === "check") return o.ok ? `Checks passed: ${esc((o.checked || []).join(", "))}` : "";
   if (def?.kind === "person") {
     const parts = Object.keys(o).filter((k) => k !== "box").map((k) => `${k}: ${typeof o[k] === "object" ? JSON.stringify(o[k]) : o[k]}`);
-    if (o.box) parts.unshift(`box ${o.box.x1 - o.box.x0} × ${o.box.y1 - o.box.y0} px`);
+    if (o.box) parts.unshift(o.box.x1 >= o.box.x0 ? `box ${o.box.x1 - o.box.x0} × ${o.box.y1 - o.box.y0} px` : `box across the panorama's seam, ${o.box.y1 - o.box.y0} px high`);
     return esc(parts.join(" · ") || "Done");
   }
   return "";
@@ -542,13 +545,13 @@ function picker(key, scanId) {
   if (p === "loading") img = `<div class="placeholder">Loading preview…</div>`;
   else if (p?.error) img = `<div class="problem">${esc(p.error)}</div>`;
   else {
-    const box = b && dims ? `<div class="boxsel" style="left:${(b.x0 / dims[0]) * 100}%;top:${(b.y0 / dims[1]) * 100}%;width:${((b.x1 - b.x0) / dims[0]) * 100}%;height:${((b.y1 - b.y0) / dims[1]) * 100}%"></div>` : "";
-    img = `<div class="pano" data-keep-scroll="${esc(key)}"><div class="pano-in ${draw ? "draw" : ""}" data-picker="${esc(key)}" data-scan="${esc(scanId)}"><img src="${esc(p)}" alt="Scan preview" data-dims="${esc(scanId)}">${box}</div></div>`;
+    const box = b && dims ? `<div class="boxsel" style="left:${(b.x0 / (2 * dims[0])) * 100}%;top:${(b.y0 / dims[1]) * 100}%;width:${(span(b, dims[0]) / (2 * dims[0])) * 100}%;height:${((b.y1 - b.y0) / dims[1]) * 100}%"></div>` : "";
+    img = `<div class="pano" data-keep-scroll="${esc(key)}"><div class="pano-in ${draw ? "draw" : ""}" data-picker="${esc(key)}" data-scan="${esc(scanId)}"><img src="${esc(p)}" alt="Scan preview" data-dims="${esc(scanId)}"><img src="${esc(p)}" alt="" aria-hidden="true" class="seam">${box}</div></div>`;
   }
   return `<div class="pano-tools"><span class="seg"><button type="button" class="${draw ? "on" : ""}" data-act="draw" data-key="${esc(key)}" data-on="1">Draw box</button><button type="button" class="${draw ? "" : "on"}" data-act="draw" data-key="${esc(key)}" data-on="0">Pan</button></span>
     ${b ? `<button type="button" class="btn small" data-act="clear-box" data-key="${esc(key)}">Clear</button>` : ""}</div>
     ${img}
-    <p class="hint">${b ? `Box ${b.x1 - b.x0} × ${b.y1 - b.y0} px.` : draw ? "Drag on the picture to draw a box around what to scan. Switch to Pan to scroll the panorama." : "Swipe to scroll the panorama, then switch to Draw box."}</p>`;
+    <p class="hint">${b && dims ? `Box ${span(b, dims[0])} × ${b.y1 - b.y0} px${b.x1 < b.x0 ? ", across the panorama's seam" : ""}.` : draw ? "Drag on the picture to draw a box around what to scan. The panorama repeats after its end, so a box can cross the seam. Switch to Pan to scroll." : "Swipe to scroll the panorama, then switch to Draw box."}</p>`;
 }
 
 function viewScans() {
@@ -578,12 +581,14 @@ function viewScans() {
 }
 
 function viewScan(id) {
-  const s = S.scans.find((x) => x.scan_id === id);
+  const s = S.scans.find((x) => x.scan_id === id) ?? S.scanById[id];
   if (!s) {
     if (!viewScan.tried?.has(id)) {
       viewScan.tried = viewScan.tried ?? new Set();
       viewScan.tried.add(id);
-      api(`/scans/${encodeURIComponent(id)}`).then((v) => { if (!S.scans.some((x) => x.scan_id === v.scan_id)) S.scans.push(v); render(); }).catch((e) => toast(e.message, true));
+      api(`/scans/${encodeURIComponent(id)}`)
+        .then((v) => { S.scanById[v.scan_id] = v; render(); })
+        .catch((e) => { viewScan.tried.delete(id); toast(e.message, true); });
     }
     return `<p class="empty">Loading scan…</p>`;
   }
@@ -733,10 +738,11 @@ document.addEventListener("focusout", () => setTimeout(() => { if (pending) rend
 
 // ---------------------------------------------------------------- drawing ---
 function pointIn(el, e, dims) {
+  // The picker shows the panorama twice: x runs over 0 … 2 × width.
   const r = el.getBoundingClientRect();
-  const x = Math.round(((e.clientX - r.left) / r.width) * dims[0]);
+  const x = Math.round(((e.clientX - r.left) / r.width) * 2 * dims[0]);
   const y = Math.round(((e.clientY - r.top) / r.height) * dims[1]);
-  return [Math.max(0, Math.min(dims[0], x)), Math.max(0, Math.min(dims[1], y))];
+  return [Math.max(0, Math.min(2 * dims[0], x)), Math.max(0, Math.min(dims[1], y))];
 }
 document.addEventListener("pointerdown", (e) => {
   const el = e.target.closest("[data-picker]");
@@ -756,16 +762,22 @@ document.addEventListener("pointermove", (e) => {
   const [w, h] = drawing.dims;
   const [a, b] = [drawing.start, drawing.end];
   Object.assign(drawing.box.style, {
-    left: `${(Math.min(a[0], b[0]) / w) * 100}%`, top: `${(Math.min(a[1], b[1]) / h) * 100}%`,
-    width: `${(Math.abs(a[0] - b[0]) / w) * 100}%`, height: `${(Math.abs(a[1] - b[1]) / h) * 100}%`,
+    left: `${(Math.min(a[0], b[0]) / (2 * w)) * 100}%`, top: `${(Math.min(a[1], b[1]) / h) * 100}%`,
+    width: `${(Math.min(Math.abs(a[0] - b[0]), w - 1) / (2 * w)) * 100}%`, height: `${(Math.abs(a[1] - b[1]) / h) * 100}%`,
   });
 });
 function endDraw() {
   if (!drawing) return;
-  const { key, start: a, end: b } = drawing;
+  const { key, start: a, end: b, dims } = drawing;
   drawing = null;
   if (Math.abs(a[0] - b[0]) >= 4 && Math.abs(a[1] - b[1]) >= 4) {
-    S.boxes[key] = { x0: Math.min(a[0], b[0]), y0: Math.min(a[1], b[1]), x1: Math.max(a[0], b[0]), y1: Math.max(a[1], b[1]) };
+    // Back to preview pixels: x0 in [0, width); a box past the end wraps (x1 < x0).
+    const W = dims[0];
+    let lo = Math.min(a[0], b[0]);
+    let hi = Math.min(Math.max(a[0], b[0]), lo + W - 1);
+    if (lo >= W) { lo -= W; hi -= W; }
+    const x1 = hi > W ? hi - W : hi;
+    S.boxes[key] = { x0: lo, y0: Math.min(a[1], b[1]), x1, y1: Math.max(a[1], b[1]) };
     const scanId = key.startsWith("aim:") ? key.slice(4) : null;
     if (scanId) delete S.aim[scanId];
   }
@@ -804,7 +816,7 @@ const actions = {
   },
   "scan-area": (el) => {
     const id = el.dataset.id;
-    const s = S.scans.find((x) => x.scan_id === id);
+    const s = S.scans.find((x) => x.scan_id === id) ?? S.scanById[id];
     const mode = document.querySelector("select[data-change=mode]")?.value || store.get("x9.mode") || "STD_L0";
     return act(async () => {
       const j = await api("/scans", { method: "POST", body: { project_id: s.project_id, kind: "area", mode, window: S.aim[id].window, note: `area from station ${s.station}` } });
@@ -821,7 +833,7 @@ const actions = {
   "dl-tzf": (el) => act(() => download(`/scans/${encodeURIComponent(el.dataset.id)}/tzf`, `${el.dataset.id}.tzf`)),
   "delete-scan": (el) => {
     const id = el.dataset.id;
-    const s = S.scans.find((x) => x.scan_id === id);
+    const s = S.scans.find((x) => x.scan_id === id) ?? S.scanById[id];
     if (!confirm(`Delete station ${s?.station ?? ""} ${s?.kind === "area" ? "area scan" : "full dome"} from the scanner? This can't be undone.`)) return;
     return act(async () => {
       await api(`/scans/${encodeURIComponent(id)}`, { method: "DELETE", headers: { "X-Confirm": id } });
