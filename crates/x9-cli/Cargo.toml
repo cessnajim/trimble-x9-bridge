@@ -1,0 +1,18 @@
+[package]
+name = "x9-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Smoke-test CLI for x9-client (status / scans / level / launch-scan)."
+
+[[bin]]
+name = "x9"
+path = "src/main.rs"
+
+[dependencies]
+x9-client = { path = "../x9-client" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,62 @@
+# Recipe v0: measure a window (test copy used by tests/e2e.py).
+
+id = "window-measurement"
+title = "Measure a window"
+version = "0.1.0"
+summary = "Overview scan, an aimed close-up of the window, a checked point export, then measuring."
+
+[[inputs]]
+name = "purpose"
+type = "choice"
+choices = ["replacement window", "blinds", "trim", "other"]
+prompt = "What is the measurement for?"
+
+[[steps]]
+id = "overview"
+title = "Overview scan from this position"
+kind = "action"
+operation = "startScan"
+arguments = { kind = "full_dome", mode = "STD_L0", color = false, note = "window overview ({{input.purpose}})" }
+
+[[steps]]
+id = "box"
+title = "Mark the window"
+kind = "person"
+instructions = "Draw a box around the window on the overview preview: about 10 cm of wall on each side and above, and down to the floor if sill height matters."
+needs = ["box"]
+preview_of = "overview"
+
+[[steps]]
+id = "aim"
+title = "Turn the box into a scan window"
+kind = "action"
+operation = "aimFromPreview"
+arguments = { reference_scan_id = "{{steps.overview.scan_id}}", box = "{{steps.box.box}}", margin_rad = 0.017 }
+
+[[steps]]
+id = "closeup"
+title = "Close-up scan of the window"
+kind = "action"
+operation = "startScan"
+arguments = { kind = "area", mode = "STD_L2", color = false, window = "{{steps.aim.window}}", note = "window close-up" }
+
+[[steps]]
+id = "export"
+title = "Decode the close-up to points"
+kind = "action"
+operation = "exportPoints"
+arguments = { scan_id = "{{steps.closeup.scan_id}}", format = "ply", intensity = "auto" }
+
+[[steps]]
+id = "checks"
+title = "Check the export"
+kind = "check"
+of = "export"
+expect = ["point_count", "levelled", "coordinates"]
+
+[[steps]]
+id = "measure"
+title = "Measure and report"
+kind = "person"
+instructions = "Measure the opening from the export and attach the check image (the measurement worker isn't built yet). Report each value with its uncertainty."
+needs = ["notes"]

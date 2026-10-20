@@ -1,0 +1,19 @@
+[package]
+name = "x9-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bridge service: the one API every client uses to reach a Trimble X9 (see api/bridge-v1.openapi.yaml)."
+
+[dependencies]
+x9-client = { path = "../x9-client" }
+axum = "0.7"
+tokio = { workspace = true, features = ["sync", "signal", "net"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
+anyhow = { workspace = true }
+trimble-tzf = { git = "https://github.com/cessnajim/trimble-tzf", rev = "2bd38dd" }
+zune-jpeg = "0.5"
+toml = "0.8"

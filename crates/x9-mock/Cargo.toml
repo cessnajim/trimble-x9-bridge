@@ -1,0 +1,12 @@
+[package]
+name = "x9-mock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mock X9 scanner API: serves /api/v1 with canned responses for offline dev."
+
+[dependencies]
+axum = "0.7"
+tokio = { workspace = true }
+serde_json = { workspace = true }
+uuid = { version = "1", features = ["v4"] }

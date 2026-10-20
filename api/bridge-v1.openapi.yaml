@@ -1,0 +1,1116 @@
+openapi: 3.1.0
+info:
+  title: X9 bridge API
+  version: 1.0.0-draft.2
+  summary: The one API every client uses to reach a Trimble X9 scanner.
+  description: |
+    The bridge service runs next to the scanner (a Pi on the tripod or a desk
+    machine) and is the only thing that talks to it. Every client goes through
+    this API: AI agents via the MCP server, the phone web UI, the `x9` CLI,
+    scripts, and agent frameworks calling these operations as functions.
+    Clients enforce nothing; the rules (busy, moved, battery, queue,
+    approvals) live here.
+
+    Conventions:
+    - JSON, `snake_case`. Lengths in metres, angles in radians, times in
+      RFC 3339 UTC, durations in seconds.
+    - `ha` is the instrument's horizontal angle as the scanner uses it
+      (clockwise seen from above, `[0, 2π)`); `va` is the vertical angle from
+      the zenith (`0` = straight up).
+    - Long work (scans, exports, measurements) returns `202` with a `Job`;
+      follow it with `GET /jobs/{job_id}` or the event stream.
+    - IDs are opaque strings assigned by the bridge. Scans are keyed by the
+      scanner's own scan UUID, because the scanner's numeric scan ids are
+      positional and can change.
+    - Errors use `application/problem+json` (RFC 9457) with a machine-readable
+      `code`.
+servers:
+  - url: http://localhost:8795/v1
+    description: Bridge on this machine
+  - url: http://{bridge}:8795/v1
+    description: Bridge over ZeroTier or the LAN
+    variables:
+      bridge:
+        default: bridge.local
+security:
+  - bearer: []
+tags:
+  - name: system
+  - name: projects
+  - name: scans
+  - name: aiming
+  - name: jobs
+  - name: approvals
+  - name: products
+  - name: recipes
+  - name: log
+
+paths:
+  /health:
+    get:
+      tags: [system]
+      operationId: getHealth
+      summary: Liveness check (no auth).
+      security: []
+      responses:
+        "200":
+          description: The bridge is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, version]
+                properties:
+                  ok: { type: boolean }
+                  version: { type: string }
+
+  /status:
+    get:
+      tags: [system]
+      operationId: getStatus
+      summary: Bridge and scanner state in one read.
+      responses:
+        "200":
+          description: Current status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Status" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /rules:
+    get:
+      tags: [system]
+      operationId: getRules
+      summary: The rules the bridge enforces, with their current settings.
+      responses:
+        "200":
+          description: Rule settings.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rules" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /scan-modes:
+    get:
+      tags: [scans]
+      operationId: listScanModes
+      summary: Scan modes the scanner offers, with time and density figures.
+      responses:
+        "200":
+          description: Modes.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ScanMode" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /projects:
+    get:
+      tags: [projects]
+      operationId: listProjects
+      responses:
+        "200":
+          description: Projects on the scanner.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Project" }
+        default: { $ref: "#/components/responses/Problem" }
+    post:
+      tags: [projects]
+      operationId: createProject
+      summary: Create a project on the scanner.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 64 }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /scans:
+    get:
+      tags: [scans]
+      operationId: listScans
+      parameters:
+        - { name: project_id, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Scans, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Scan" }
+        default: { $ref: "#/components/responses/Problem" }
+    post:
+      tags: [scans]
+      operationId: startScan
+      summary: Queue a full-dome or area scan.
+      description: |
+        Admission runs every rule. A request no rule blocks is queued; one that
+        needs a person's approval is queued as `awaiting_approval` unless an
+        active grant covers it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScanRequest" }
+      responses:
+        "202":
+          description: Queued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /scans/{scan_id}:
+    parameters: [{ $ref: "#/components/parameters/ScanId" }]
+    get:
+      tags: [scans]
+      operationId: getScan
+      responses:
+        "200":
+          description: One scan.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Scan" }
+        default: { $ref: "#/components/responses/Problem" }
+    delete:
+      tags: [scans]
+      operationId: deleteScan
+      summary: Delete a scan from the scanner (operator only, confirmed).
+      parameters: [{ $ref: "#/components/parameters/Confirm" }]
+      responses:
+        "204": { description: Deleted. }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /scans/{scan_id}/preview:
+    parameters: [{ $ref: "#/components/parameters/ScanId" }]
+    get:
+      tags: [scans]
+      operationId: getScanPreview
+      summary: The scanner's preview image (grid-aligned intensity panorama).
+      responses:
+        "200":
+          description: JPEG.
+          content:
+            image/jpeg:
+              schema: { type: string, format: binary }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /scans/{scan_id}/tzf:
+    parameters: [{ $ref: "#/components/parameters/ScanId" }]
+    get:
+      tags: [scans]
+      operationId: getScanTzf
+      summary: The raw scan file.
+      responses:
+        "200":
+          description: TZF bytes.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /aim:
+    post:
+      tags: [aiming]
+      operationId: aimFromPreview
+      summary: Turn a box drawn on a scan's preview into an area-scan window.
+      description: |
+        Valid only while the scanner has not moved since `reference_scan_id`
+        was taken; otherwise the response is `409 instrument_moved`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AimRequest" }
+      responses:
+        "200":
+          description: The window to scan.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AimResult" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /jobs:
+    get:
+      tags: [jobs]
+      operationId: listJobs
+      parameters:
+        - name: state
+          in: query
+          schema: { $ref: "#/components/schemas/JobState" }
+      responses:
+        "200":
+          description: Jobs, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Job" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /jobs/{job_id}:
+    parameters: [{ $ref: "#/components/parameters/JobId" }]
+    get:
+      tags: [jobs]
+      operationId: getJob
+      responses:
+        "200":
+          description: One job.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /jobs/{job_id}/cancel:
+    parameters: [{ $ref: "#/components/parameters/JobId" }]
+    post:
+      tags: [jobs]
+      operationId: cancelJob
+      summary: Cancel a queued or running job (stops the scanner if scanning).
+      responses:
+        "200":
+          description: Cancelled, or already finished.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /jobs/{job_id}/approve:
+    parameters: [{ $ref: "#/components/parameters/JobId" }]
+    post:
+      tags: [approvals]
+      operationId: approveJob
+      summary: Approve one job that is awaiting approval (operator only).
+      responses:
+        "200":
+          description: Approved and queued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /grants:
+    get:
+      tags: [approvals]
+      operationId: listGrants
+      responses:
+        "200":
+          description: Active grants.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Grant" }
+        default: { $ref: "#/components/responses/Problem" }
+    post:
+      tags: [approvals]
+      operationId: createGrant
+      summary: Let jobs inside a scope run without asking each time (operator only).
+      description: |
+        A grant covers scans and processing within its limits, for example
+        "up to 12 scans in project P for the next 2 hours". It never covers
+        deletes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GrantRequest" }
+      responses:
+        "201":
+          description: Granted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Grant" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /grants/{grant_id}:
+    parameters:
+      - { name: grant_id, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [approvals]
+      operationId: revokeGrant
+      responses:
+        "204": { description: Revoked. }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /scans/{scan_id}/exports:
+    parameters: [{ $ref: "#/components/parameters/ScanId" }]
+    post:
+      tags: [products]
+      operationId: exportPoints
+      summary: Decode the scan to levelled points and write a file.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExportRequest" }
+      responses:
+        "202":
+          description: Queued; the job's result is an `Export`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /exports/{export_id}:
+    parameters:
+      - { name: export_id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [products]
+      operationId: getExport
+      responses:
+        "200":
+          description: Export metadata and its checks.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Export" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /exports/{export_id}/file:
+    parameters:
+      - { name: export_id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [products]
+      operationId: getExportFile
+      responses:
+        "200":
+          description: The PLY or LAS file.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /scans/{scan_id}/measurements:
+    parameters: [{ $ref: "#/components/parameters/ScanId" }]
+    post:
+      tags: [products]
+      operationId: measure
+      summary: Measure a feature in a scan (runs in the measurement worker).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MeasurementRequest" }
+      responses:
+        "202":
+          description: Queued; the job's result is a `Measurement`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Job" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /measurements/{measurement_id}:
+    parameters:
+      - { name: measurement_id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [products]
+      operationId: getMeasurement
+      responses:
+        "200":
+          description: Values, uncertainties, checks and the evidence image.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Measurement" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /measurements/{measurement_id}/evidence:
+    parameters:
+      - { name: measurement_id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [products]
+      operationId: getMeasurementEvidence
+      summary: The annotated check image for a person or a vision model to verify.
+      responses:
+        "200":
+          description: PNG.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /recipes:
+    get:
+      tags: [recipes]
+      operationId: listRecipes
+      responses:
+        "200":
+          description: Installed recipes.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RecipeSummary" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /recipes/{recipe_id}:
+    parameters:
+      - { name: recipe_id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [recipes]
+      operationId: getRecipe
+      responses:
+        "200":
+          description: The recipe, as data.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Recipe" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /runs:
+    get:
+      tags: [recipes]
+      operationId: listRuns
+      responses:
+        "200":
+          description: Runs, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Run" }
+        default: { $ref: "#/components/responses/Problem" }
+    post:
+      tags: [recipes]
+      operationId: startRun
+      summary: Start running a recipe.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [recipe_id, project_id]
+              properties:
+                recipe_id: { type: string }
+                project_id: { type: string }
+                inputs:
+                  type: object
+                  additionalProperties: true
+                  description: Values for the recipe's declared inputs.
+      responses:
+        "201":
+          description: Started.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Run" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /runs/{run_id}:
+    parameters: [{ $ref: "#/components/parameters/RunId" }]
+    get:
+      tags: [recipes]
+      operationId: getRun
+      responses:
+        "200":
+          description: The run and the state of each step.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Run" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /runs/{run_id}/advance:
+    parameters: [{ $ref: "#/components/parameters/RunId" }]
+    post:
+      tags: [recipes]
+      operationId: advanceRun
+      summary: Complete the current step that waits on someone (a choice, a confirmation, a box on the preview).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [step_id]
+              properties:
+                step_id: { type: string }
+                input:
+                  type: object
+                  additionalProperties: true
+      responses:
+        "200":
+          description: Updated run.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Run" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /runs/{run_id}/cancel:
+    parameters: [{ $ref: "#/components/parameters/RunId" }]
+    post:
+      tags: [recipes]
+      operationId: cancelRun
+      summary: Stop a run; a scan in flight is cancelled too.
+      responses:
+        "200":
+          description: The run (it settles to `cancelled` shortly).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Run" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /log:
+    get:
+      tags: [log]
+      operationId: getLog
+      summary: The field log, oldest first.
+      parameters:
+        - { name: since, in: query, schema: { type: string, format: date-time } }
+        - { name: project_id, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Entries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/LogEntry" }
+        default: { $ref: "#/components/responses/Problem" }
+    post:
+      tags: [log]
+      operationId: addLogNote
+      summary: Add a note (a person's or an agent's observation).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string, maxLength: 4000 }
+                project_id: { type: string }
+      responses:
+        "201":
+          description: Added.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LogEntry" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /events:
+    get:
+      tags: [system]
+      operationId: streamEvents
+      summary: Server-sent events for job progress, status changes and log entries.
+      responses:
+        "200":
+          description: |
+            `text/event-stream`. Event types: `job`, `status`, `log`. Each
+            event's data is the full JSON object (`Job`, `Status` or
+            `LogEntry`), so a client never needs to re-fetch.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        default: { $ref: "#/components/responses/Problem" }
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: |
+        One token per user or device. Each token has a role: `viewer` (read
+        only), `agent` (read, queue work; scans need approval or a grant),
+        `operator` (everything an agent can, plus approvals, grants and
+        confirmed deletes) or `admin` (also rule settings and tokens).
+
+  parameters:
+    ScanId:
+      name: scan_id
+      in: path
+      required: true
+      schema: { type: string }
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      schema: { type: string }
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      schema: { type: string }
+    Confirm:
+      name: X-Confirm
+      in: header
+      required: true
+      description: Must repeat the id of the resource being deleted.
+      schema: { type: string }
+
+  responses:
+    Problem:
+      description: An error, with a machine-readable code.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        code:
+          type: string
+          enum:
+            - unauthorized
+            - forbidden
+            - not_found
+            - invalid_request
+            - scanner_disconnected
+            - scanner_busy
+            - instrument_moved
+            - battery_low
+            - storage_low
+            - needs_approval
+            - confirm_mismatch
+            - decode_failed
+            - check_failed
+            - worker_unavailable
+            - conflict
+        hint:
+          type: string
+          description: What a client or person can do to clear it.
+
+    Status:
+      type: object
+      required: [bridge, scanner]
+      properties:
+        bridge:
+          type: object
+          required: [version, started_at]
+          properties:
+            version: { type: string }
+            started_at: { type: string, format: date-time }
+            queue_length: { type: integer }
+            worker_ready:
+              type: boolean
+              description: Whether the measurement worker is available.
+        scanner:
+          type: object
+          required: [connected]
+          properties:
+            connected: { type: boolean }
+            busy: { type: boolean }
+            current_job_id: { type: [string, "null"] }
+            battery_pct: { type: integer, minimum: 0, maximum: 100 }
+            on_ac_power: { type: boolean }
+            storage_free_bytes: { type: integer }
+            moved_since_last_scan: { type: boolean }
+            leveling:
+              type: object
+              properties:
+                state: { type: string, enum: [none, in_progress, ok, error] }
+                compensator_on: { type: boolean }
+                tilt_rad:
+                  type: array
+                  description: The two compensator readings, radians.
+                  items: { type: number }
+                  minItems: 2
+                  maxItems: 2
+
+    Rules:
+      type: object
+      properties:
+        min_battery_pct_to_scan: { type: integer, default: 15 }
+        min_storage_free_bytes: { type: integer, default: 2000000000 }
+        require_approval_for_scans: { type: boolean, default: true }
+        refuse_aim_after_move: { type: boolean, default: true }
+        max_queue_length: { type: integer, default: 20 }
+
+    ScanMode:
+      type: object
+      required: [mode, range_m, angular_step_rad, fixed_seconds, full_dome_seconds]
+      properties:
+        mode: { type: string, examples: [STD_L0, STD_L2, HS_L1] }
+        range_m: { type: number }
+        angular_step_rad: { type: number }
+        points_full_dome: { type: integer }
+        fixed_seconds:
+          type: number
+          description: Overhead every scan pays (leveling to file ready).
+        full_dome_seconds:
+          type: number
+          description: The scanner's own estimate for a full-dome scan in this mode (color off).
+
+    Project:
+      type: object
+      required: [project_id, name]
+      properties:
+        project_id: { type: string }
+        name: { type: string }
+        scan_count: { type: integer }
+
+    Window:
+      type: object
+      description: An area-scan window. `delta_ha` may cross 2π.
+      required: [start_ha, delta_ha, start_va, delta_va]
+      properties:
+        start_ha: { type: number, minimum: 0, exclusiveMaximum: 6.283185307179586 }
+        delta_ha: { type: number, exclusiveMinimum: 0, maximum: 6.283185307179586 }
+        start_va: { type: number, minimum: 0, maximum: 3.141592653589793 }
+        delta_va: { type: number, exclusiveMinimum: 0, maximum: 3.141592653589793 }
+
+    ScanRequest:
+      type: object
+      required: [project_id, kind, mode]
+      properties:
+        project_id: { type: string }
+        kind: { type: string, enum: [full_dome, area] }
+        mode: { type: string, examples: [STD_L0, STD_L2] }
+        color:
+          type: boolean
+          default: false
+          description: Camera images after the sweep. Adds ~150 s; off by default.
+        window:
+          $ref: "#/components/schemas/Window"
+          description: Required when `kind` is `area`.
+        note: { type: string, description: Recorded in the field log. }
+
+    Scan:
+      type: object
+      required: [scan_id, project_id, kind, mode]
+      properties:
+        scan_id: { type: string }
+        project_id: { type: string }
+        parent_scan_id:
+          type: [string, "null"]
+          description: For area scans, the station scan they belong to.
+        station: { type: integer, description: Station number within the project. }
+        kind: { type: string, enum: [full_dome, area] }
+        mode: { type: string }
+        color: { type: boolean }
+        window: { $ref: "#/components/schemas/Window" }
+        created_at:
+          type: [string, "null"]
+          format: date-time
+          description: Known only for scans the bridge ran; the scanner doesn't record it.
+        grid:
+          type: object
+          properties:
+            rows: { type: integer }
+            cols: { type: integer }
+        point_count: { type: integer }
+        tzf_bytes: { type: integer }
+        has_intensity:
+          type: boolean
+          description: Whether the scan file itself carries intensity (otherwise the preview supplies it).
+        timings:
+          type: object
+          description: Seconds from queueing, as observed.
+          properties:
+            leveling_s: { type: number }
+            sweep_s: { type: number }
+            geometry_ready_s: { type: number }
+            done_s: { type: number }
+
+    AimRequest:
+      type: object
+      required: [reference_scan_id, box]
+      properties:
+        reference_scan_id:
+          type: string
+          description: A scan from the current station whose preview the box was drawn on.
+        box:
+          type: object
+          description: Preview pixels, y down. `x1 < x0` wraps across the panorama seam.
+          required: [x0, y0, x1, y1]
+          properties:
+            x0: { type: integer, minimum: 0 }
+            y0: { type: integer, minimum: 0 }
+            x1: { type: integer, minimum: 0 }
+            y1: { type: integer, minimum: 0 }
+        margin_rad: { type: number, default: 0.009, minimum: 0 }
+
+    AimResult:
+      type: object
+      required: [window]
+      properties:
+        window: { $ref: "#/components/schemas/Window" }
+        estimated_seconds:
+          type: object
+          description: Predicted time per mode, from the mode's fixed and sweep figures.
+          additionalProperties: { type: number }
+
+    JobState:
+      type: string
+      enum: [awaiting_approval, queued, running, succeeded, failed, cancelled]
+
+    Job:
+      type: object
+      required: [job_id, kind, state, created_at]
+      properties:
+        job_id: { type: string }
+        kind: { type: string, enum: [scan, export, measurement] }
+        state: { $ref: "#/components/schemas/JobState" }
+        phase:
+          type: string
+          description: For scans.
+          enum: [leveling, sweeping, imaging, downloading, decoding]
+        progress: { type: number, minimum: 0, maximum: 1 }
+        requested_by: { type: string, description: Token name. }
+        run_id: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        started_at: { type: [string, "null"], format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+        result:
+          description: Set when `state` is `succeeded`.
+          oneOf:
+            - { $ref: "#/components/schemas/ScanRef" }
+            - { $ref: "#/components/schemas/ExportRef" }
+            - { $ref: "#/components/schemas/MeasurementRef" }
+        problem: { $ref: "#/components/schemas/Problem" }
+
+    ScanRef:
+      type: object
+      required: [scan_id]
+      properties: { scan_id: { type: string } }
+    ExportRef:
+      type: object
+      required: [export_id]
+      properties: { export_id: { type: string } }
+    MeasurementRef:
+      type: object
+      required: [measurement_id]
+      properties: { measurement_id: { type: string } }
+
+    GrantRequest:
+      type: object
+      required: [project_id, expires_at]
+      properties:
+        project_id: { type: string }
+        expires_at: { type: string, format: date-time }
+        max_scans: { type: integer, minimum: 1 }
+        allowed_modes:
+          type: array
+          items: { type: string }
+        allow_color: { type: boolean, default: false }
+        run_id:
+          type: string
+          description: Limit the grant to one recipe run.
+
+    Grant:
+      allOf:
+        - $ref: "#/components/schemas/GrantRequest"
+        - type: object
+          required: [grant_id, granted_by, scans_used]
+          properties:
+            grant_id: { type: string }
+            granted_by: { type: string }
+            scans_used: { type: integer }
+
+    Check:
+      type: object
+      description: One automatic check on a product. Clients should not use a product whose checks failed without saying so.
+      required: [name, ok]
+      properties:
+        name:
+          type: string
+          examples: [point_count, levelled, plane_flatness, plumb, level]
+        ok: { type: boolean }
+        value: { type: number }
+        threshold: { type: number }
+        unit: { type: string }
+        detail: { type: string }
+
+    ExportRequest:
+      type: object
+      required: [format]
+      properties:
+        format: { type: string, enum: [ply, las] }
+        intensity:
+          type: string
+          enum: [auto, scan, preview, none]
+          default: auto
+          description: "`auto` uses the scan's own intensity when present, else the preview."
+
+    Export:
+      type: object
+      required: [export_id, scan_id, format, point_count, checks]
+      properties:
+        export_id: { type: string }
+        scan_id: { type: string }
+        format: { type: string, enum: [ply, las] }
+        point_count: { type: integer }
+        bytes: { type: integer }
+        bounds_m:
+          type: object
+          properties:
+            min: { type: array, items: { type: number }, minItems: 3, maxItems: 3 }
+            max: { type: array, items: { type: number }, minItems: 3, maxItems: 3 }
+        checks:
+          type: array
+          items: { $ref: "#/components/schemas/Check" }
+
+    MeasurementRequest:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [opening]
+          description: v1 measures one thing well; more kinds come later.
+        hint_box:
+          type: object
+          description: Optional preview box around the feature (same form as `AimRequest.box`).
+          properties:
+            x0: { type: integer }
+            y0: { type: integer }
+            x1: { type: integer }
+            y1: { type: integer }
+        avoid:
+          type: array
+          description: Preview boxes to ignore (a plant, a person).
+          items:
+            type: object
+            properties:
+              x0: { type: integer }
+              y0: { type: integer }
+              x1: { type: integer }
+              y1: { type: integer }
+
+    Measurement:
+      type: object
+      required: [measurement_id, scan_id, kind, values, checks, evidence_url]
+      properties:
+        measurement_id: { type: string }
+        scan_id: { type: string }
+        kind: { type: string }
+        values:
+          type: array
+          items:
+            type: object
+            required: [name, value_m, uncertainty_m]
+            properties:
+              name:
+                type: string
+                examples: [opening_width, opening_height, frame_depth, glass_width_left]
+              value_m: { type: number }
+              uncertainty_m: { type: number }
+              basis: { type: string, description: How it was measured, in one line. }
+        checks:
+          type: array
+          items: { $ref: "#/components/schemas/Check" }
+        evidence_url:
+          type: string
+          description: Relative URL of the annotated check image.
+
+    RecipeSummary:
+      type: object
+      required: [recipe_id, title, version]
+      properties:
+        recipe_id: { type: string, examples: [window-measurement] }
+        title: { type: string }
+        version: { type: string }
+        summary: { type: string }
+
+    Recipe:
+      allOf:
+        - $ref: "#/components/schemas/RecipeSummary"
+        - type: object
+          required: [steps]
+          properties:
+            inputs:
+              type: array
+              items:
+                type: object
+                required: [name, type]
+                properties:
+                  name: { type: string }
+                  type: { type: string, enum: [string, number, boolean, choice] }
+                  choices: { type: array, items: { type: string } }
+                  prompt: { type: string }
+            steps:
+              type: array
+              items: { $ref: "#/components/schemas/RecipeStep" }
+
+    RecipeStep:
+      type: object
+      description: |
+        One step. `action` steps call an API operation; `person` steps wait
+        for someone (move the tripod, confirm, draw a box) via `advance`.
+      required: [step_id, title, kind]
+      properties:
+        step_id: { type: string }
+        title: { type: string }
+        kind: { type: string, enum: [action, person, check] }
+        operation_id:
+          type: string
+          description: For `action` steps, the API operation to call.
+        arguments:
+          type: object
+          additionalProperties: true
+          description: Fixed arguments; `{{input.name}}` and `{{steps.<id>.result}}` placeholders allowed.
+        instructions: { type: string, description: What to tell the person, for `person` steps. }
+        needs:
+          type: array
+          description: For `person` steps, the fields `advance` must supply.
+          items: { type: string }
+        preview_of: { type: string, description: For `person` steps, an earlier step whose scan preview to show. }
+        of: { type: string, description: For `check` steps, the earlier step whose checks are inspected. }
+        expect:
+          type: array
+          description: For `check` steps, the checks that must pass.
+          items: { type: string }
+
+    Run:
+      type: object
+      required: [run_id, recipe_id, project_id, state, steps]
+      properties:
+        run_id: { type: string }
+        recipe_id: { type: string }
+        project_id: { type: string }
+        state: { type: string, enum: [running, waiting_for_person, succeeded, failed, cancelled] }
+        waiting_for:
+          type: [string, "null"]
+          enum: [approval, input, null]
+          description: When waiting, whether for an operator's approval or a person step's input.
+        recipe_version: { type: string }
+        started_by: { type: string }
+        created_at: { type: string, format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+        problem: { $ref: "#/components/schemas/Problem" }
+        current_step_id: { type: [string, "null"] }
+        steps:
+          type: array
+          items:
+            type: object
+            required: [step_id, state]
+            properties:
+              step_id: { type: string }
+              state: { type: string, enum: [pending, running, waiting, done, failed, skipped] }
+              job_id: { type: [string, "null"] }
+              output: { type: object, additionalProperties: true }
+
+    LogEntry:
+      type: object
+      required: [entry_id, at, kind, text]
+      properties:
+        entry_id: { type: string }
+        at: { type: string, format: date-time }
+        kind: { type: string, enum: [note, scan, export, run, check, approval, rule, error] }
+        text: { type: string }
+        author: { type: string, description: Token name, or "bridge". }
+        project_id: { type: [string, "null"] }
+        refs:
+          type: object
+          additionalProperties: { type: string }
+          description: Related ids (job_id, scan_id, run_id).

@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/x9-client", "crates/x9-mock", "crates/x9-cli", "crates/x9-bridge"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs"] }
+anyhow = "1"
+thiserror = "2"

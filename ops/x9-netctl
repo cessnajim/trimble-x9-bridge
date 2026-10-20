@@ -1,0 +1,122 @@
+#!/bin/bash
+# x9-netctl — vetted privileged helper for the X9 controller project.
+# Confines the root operations Claude may run (sudo -n /usr/local/sbin/x9-netctl <verb>).
+# Review before installing.
+#
+# Config via environment (defaults match the reference Fedora dev box):
+#   X9_GW, X9_ETH_CON, X9_ETH_DEV, X9_WIFI_DEV, X9_ETH_METRIC, X9_WIFI_METRIC
+set -euo pipefail
+
+GW=${X9_GW:-192.168.88.1}
+ETH_CON=${X9_ETH_CON:-"Wired connection 1"}
+ETH_DEV=${X9_ETH_DEV:-enp3s0}
+WIFI_DEV=${X9_WIFI_DEV:-wlo1}
+ETH_METRIC=${X9_ETH_METRIC:-100}
+WIFI_METRIC=${X9_WIFI_METRIC:-600}
+REVERT_UNIT=x9-net-revert
+USB_CON=x9-usb
+
+# Find the X9's network interface by its USB driver (cdc_eem, rndis_host or cdc_ether).
+find_x9_iface() {
+  local d n drv
+  for d in /sys/class/net/*; do
+    n=$(basename "$d")
+    drv=$(basename "$(readlink -f "$d/device/driver" 2>/dev/null)" 2>/dev/null || true)
+    case "$drv" in cdc_eem|rndis_host|cdc_ether) echo "$n"; return 0;; esac
+  done
+  return 1
+}
+
+usage() {
+  echo "usage: x9-netctl {status | uplink-ethernet [secs] | uplink-wifi | disarm |"
+  echo "                  usb-up | usb-info | usb-down | capture <iface> <out.pcap> | capture-stop}"
+  exit 2
+}
+
+case "${1:-}" in
+  status)
+    ip -br addr show "$ETH_DEV" || true
+    ip -br addr show "$WIFI_DEV" || true
+    echo "--- default routes ---"; ip route show default
+    echo "--- internet egress ---"; ip route get 8.8.8.8 || true
+    ;;
+
+  uplink-ethernet)
+    secs=${2:-240}
+    systemctl stop "${REVERT_UNIT}.timer" 2>/dev/null || true
+    systemctl reset-failed "${REVERT_UNIT}.service" 2>/dev/null || true
+    systemd-run --on-active="${secs}" --unit="${REVERT_UNIT}" /usr/local/sbin/x9-netctl uplink-wifi
+    echo "deadman armed: reverts to WiFi uplink in ${secs}s (unit ${REVERT_UNIT})"
+    nmcli con mod "$ETH_CON" ipv4.gateway "$GW" ipv4.route-metric "$ETH_METRIC"
+    nmcli dev reapply "$ETH_DEV" || true
+    ip route replace default via "$GW" dev "$ETH_DEV" metric "$ETH_METRIC"
+    sleep 2; ip route show default; ip route get 8.8.8.8 || true
+    ;;
+
+  uplink-wifi)
+    nmcli con mod "$ETH_CON" ipv4.gateway "" ipv4.route-metric -1
+    nmcli dev reapply "$ETH_DEV" || true
+    ip route del default dev "$ETH_DEV" 2>/dev/null || true
+    ip route replace default via "$GW" dev "$WIFI_DEV" metric "$WIFI_METRIC"
+    logger "x9-netctl: reverted to WiFi uplink"; ip route show default
+    ;;
+
+  disarm)
+    systemctl stop "${REVERT_UNIT}.timer" 2>/dev/null || true
+    systemctl reset-failed "${REVERT_UNIT}.service" 2>/dev/null || true
+    echo "deadman disarmed"
+    ;;
+
+  usb-up)
+    # Bring up the X9's USB-RNDIS interface, STRICTLY ISOLATED:
+    # never a default route, never its DNS, high metric. Then re-assert the
+    # wired uplink so the scanner can never hijack Fedora's networking.
+    modprobe rndis_host 2>/dev/null || true
+    modprobe cdc_ether 2>/dev/null || true
+    IFACE=""
+    for _ in $(seq 1 12); do IFACE=$(find_x9_iface || true); [ -n "$IFACE" ] && break; sleep 1; done
+    if [ -z "$IFACE" ]; then
+      echo "ERROR: no RNDIS/CDC interface appeared. Is the X9 plugged in and powered?"
+      echo "USB present?:"; lsusb | grep -i "099e:0200" || echo "  (099e:0200 not in lsusb)"
+      exit 1
+    fi
+    echo "X9 interface: $IFACE"
+    nmcli con delete "$USB_CON" >/dev/null 2>&1 || true
+    nmcli con add type ethernet ifname "$IFACE" con-name "$USB_CON" \
+      ipv4.method auto ipv4.never-default yes ipv4.ignore-auto-dns yes \
+      ipv4.route-metric 5000 ipv6.method ignore >/dev/null
+    nmcli con up "$USB_CON" >/dev/null 2>&1 || true
+    sleep 3
+    # SAFETY: guarantee the wired uplink remains the only default route.
+    ip route replace default via "$GW" dev "$ETH_DEV" metric "$ETH_METRIC" 2>/dev/null || true
+    echo "--- $IFACE address ---"; ip -4 addr show "$IFACE" | grep inet || echo "(no IPv4 — gadget may not DHCP)"
+    echo "--- routes on $IFACE (should be subnet-only, NO default) ---"; ip route show dev "$IFACE" || true
+    echo "--- default routes (lifeline must be $ETH_DEV) ---"; ip route show default
+    ;;
+
+  usb-info)
+    IFACE=$(find_x9_iface || true)
+    [ -z "$IFACE" ] && { echo "no X9 interface up"; exit 1; }
+    echo "iface=$IFACE"; ip -4 addr show "$IFACE" | grep inet || true
+    echo "--- routes on $IFACE ---"; ip route show dev "$IFACE" || true
+    ;;
+
+  usb-down)
+    nmcli con down "$USB_CON" 2>/dev/null || true
+    nmcli con delete "$USB_CON" 2>/dev/null || true
+    echo "$USB_CON removed"
+    ;;
+
+  capture)
+    iface=${2:?iface}; out=${3:?out.pcap}
+    nohup tcpdump -i "$iface" -w "$out" 'tcp or udp' >/dev/null 2>&1 &
+    echo "capturing on $iface -> $out (pid $!)"
+    ;;
+
+  capture-stop)
+    pkill -f "tcpdump -i " 2>/dev/null || true
+    echo "capture stopped"
+    ;;
+
+  *) usage ;;
+esac
