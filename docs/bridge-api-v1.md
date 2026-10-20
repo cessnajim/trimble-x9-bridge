@@ -150,6 +150,8 @@ operator token for approvals.
 
 Cancel on the real X9 (2026-10-20, field Pi over the scanner's Wi-Fi): `POST /jobs/{id}/cancel` during the sweep stopped the scanner; the job read `cancelled` within a second, while the scanner's own task took 13 s more to clear (exitResult stayed "none"). A scan queued in that window now waits for the task to clear. The scanner still files the partial sweep as a scan (69,552 points from 5 s of an HS_L1 dome); the cancelled job points at it as `partial_scan_id`, with a field-log entry, so a person can keep or delete it. The simulator does both.
 
+Verified on the real X9 the same day (5ad67aa): a full dome cancelled 1 s into the sweep, an area scan queued 0.1 s later. The bridge logged that it was waiting, launched the area scan once the scanner cleared the old task (13.3 s after the cancel), and both cancelled jobs carried the right `partial_scan_id`. While waiting, the job reads phase `leveling`; a `waiting` phase would be clearer. The scanner filed that area scan under the cancelled dome's station (`8_1.tzf` under `8.tzf`): an area scan belongs to the latest station even when that station's dome was cancelled.
+
 Found and fixed: approval / cancel / finish log entries lacked the project id;
 default port moved from 8790 (taken on the Fedora box) to 8795.
 
