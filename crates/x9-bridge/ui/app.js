@@ -39,6 +39,9 @@ const S = {
   dims: {},        // scan_id -> [w, h]
   boxes: {},       // picker key -> {x0, y0, x1, y1}
   drawMode: {},    // picker key -> bool
+  boxFrom: {},     // picker key -> proposal time the box was loaded from
+  userDrew: {},    // picker key -> true once a person drew their own box
+  boxShown: {},    // picker key -> which box was last scrolled into view
   aim: {},         // scan_id -> aim result
   exports: {},     // export_id -> export record
   watchExport: {}, // scan_id -> job_id
@@ -433,7 +436,7 @@ function viewNow() {
       if (!S.recipe[r.recipe_id]) recipe(r.recipe_id);
       return `<a class="card link attn" href="#/run/${encodeURIComponent(r.run_id)}">
         <div class="line"><strong class="grow ellip">${esc(recipeTitle(r.recipe_id))}</strong>${stateChip(r.state)}</div>
-        <div class="meta">${esc(step?.instructions ?? `Step “${r.current_step_id}” is waiting for input`)}</div></a>`;
+        <div class="meta">${esc((() => { const p = r.steps.find((x) => x.step_id === r.current_step_id)?.proposal; return p ? `${p.by} proposed an answer${p.note ? `: ${p.note.replace(/[.\s]+$/, "")}` : ""}. Check it.` : step?.instructions ?? `Step “${r.current_step_id}” is waiting for input`; })())}</div></a>`;
     }),
   ];
 
@@ -504,12 +507,24 @@ function viewRun(id) {
     const key = `run:${r.run_id}:${cur.step_id}`;
     let previewScan = null;
     if (d.preview_of) previewScan = r.steps.find((s) => s.step_id === d.preview_of)?.output?.scan_id ?? null;
-    const fields = needs.filter((n) => n !== "box").map((n) => `<label class="field"><span>${esc(n)}</span><input type="text" name="${esc(n)}" inputmode="decimal" autocomplete="off"></label>`).join("");
-    panel = `<div class="card attn"><h3>${esc(d.title ?? cur.step_id)}</h3>
-      <p>${esc(d.instructions ?? "This step needs your input.")}</p>
+    const prop = cur.proposal;
+    // AI-first: the agent proposes, the person validates. Load the proposed box
+    // unless the person has drawn their own; a newer proposal replaces it.
+    if (prop?.input?.box && !S.userDrew[key] && S.boxFrom[key] !== prop.at) {
+      S.boxes[key] = prop.input.box;
+      S.boxFrom[key] = prop.at;
+      if (S.drawMode[key] === undefined) S.drawMode[key] = false;
+    }
+    const val = (n) => (prop?.input?.[n] == null ? "" : typeof prop.input[n] === "object" ? JSON.stringify(prop.input[n]) : String(prop.input[n]));
+    const fields = needs.filter((n) => n !== "box").map((n) => `<label class="field"><span>${esc(n)}</span>${String(val(n)).length > 40 ? `<textarea name="${esc(n)}">${esc(val(n))}</textarea>` : `<input type="text" name="${esc(n)}" value="${esc(val(n))}" autocomplete="off">`}</label>`).join("");
+    const changed = prop && (S.userDrew[key] || false);
+    panel = `<div class="card attn"><h3>${esc(prop ? `Check ${prop.by}'s answer` : d.title ?? cur.step_id)}</h3>
+      ${prop ? `<div class="note">${esc(prop.by)} proposed this ${esc(ago(prop.at))}${prop.note ? `: “${esc(prop.note)}”` : "."} Confirm it, or adjust it first.</div>
+        <p class="hint">The step asks: ${esc(d.instructions ?? "")}</p>`
+        : `<p>${esc(d.instructions ?? "This step needs your input.")}</p><p class="hint">Waiting for the agent to propose an answer. You can also give it yourself.</p>`}
       ${needs.includes("box") ? (previewScan ? picker(key, previewScan) : `<div class="problem">No preview to draw on.</div>`) : ""}
       ${mayAdvance(r) ? `<form data-form="advance" data-run="${esc(r.run_id)}" data-step="${esc(cur.step_id)}" data-key="${esc(key)}">${fields}
-        <button class="btn primary wide" ${S.busy || (needs.includes("box") && !S.boxes[key]) ? "disabled" : ""}>Continue</button></form>`
+        <button class="btn ${prop && !changed ? "good" : "primary"} wide" ${S.busy || (needs.includes("box") && !S.boxes[key]) ? "disabled" : ""}>${prop ? (changed ? "Continue with my box" : "Looks right") : "Continue"}</button></form>`
         : `<p class="hint">Only ${esc(r.started_by)} or an operator can continue this run.</p>`}</div>`;
   } else if (r.state === "waiting_for_person" && r.waiting_for === "approval" && cur?.job_id) {
     const j = S.jobs.find((x) => x.job_id === cur.job_id);
@@ -706,7 +721,14 @@ function render(force = false) {
   // Form fields keep what was typed or picked, and focus, across redraws.
   const fieldKey = (el) => { const f = el.closest("form[data-form]"); return f && el.name ? [f.dataset.form, f.dataset.id, f.dataset.run, f.dataset.step, el.name].join("|") : null; };
   const fields = {};
-  root.querySelectorAll("form[data-form] [name]").forEach((el) => { const k = fieldKey(el); if (k) fields[k] = el.type === "checkbox" ? el.checked : el.value; });
+  // Only what a person changed is kept; a field still showing what the page
+  // put there takes the new page's value (e.g. an agent's proposal arriving).
+  root.querySelectorAll("form[data-form] [name]").forEach((el) => {
+    const k = fieldKey(el);
+    if (!k) return;
+    const changed = el.type === "checkbox" ? el.checked !== el.defaultChecked : el.value !== el.defaultValue;
+    if (changed || el.tagName === "SELECT") fields[k] = el.type === "checkbox" ? el.checked : el.value;
+  });
   const focusKey = document.activeElement && root.contains(document.activeElement) ? fieldKey(document.activeElement) : null;
   const scroll = {};
   root.querySelectorAll("[data-keep-scroll]").forEach((el) => { scroll[el.dataset.keepScroll] = el.scrollLeft; });
@@ -718,7 +740,24 @@ function render(force = false) {
   }
   root.innerHTML = viewTop() + `<main>${viewMain()}</main>` + viewNav() + viewSheet() +
     (S.toast ? `<div class="toast ${S.toast.bad ? "bad" : ""}" role="status">${esc(S.toast.text)}</div>` : "");
-  root.querySelectorAll("[data-keep-scroll]").forEach((el) => { if (scroll[el.dataset.keepScroll] != null) el.scrollLeft = scroll[el.dataset.keepScroll]; });
+  root.querySelectorAll("[data-keep-scroll]").forEach((el) => {
+    const k = el.dataset.keepScroll;
+    const pick = el.querySelector("[data-picker]");
+    const b = S.boxes[k];
+    const dims = pick && S.dims[pick.dataset.scan];
+    // Bring a box into view once, as soon as the picture's size is known
+    // (e.g. the agent's proposal at the far end); after that keep the
+    // person's own scrolling.
+    if (b && dims && S.boxShown[k] !== S.boxFrom[k] + "|" + b.x0) {
+      S.boxShown[k] = S.boxFrom[k] + "|" + b.x0;
+      if (!S.userDrew[k]) {
+        const centre = (b.x0 + span(b, dims[0]) / 2) / (2 * dims[0]);
+        el.scrollLeft = Math.max(0, centre * pick.scrollWidth - el.clientWidth / 2);
+        return;
+      }
+    }
+    if (scroll[k] != null) el.scrollLeft = scroll[k];
+  });
   root.querySelectorAll("form[data-form] [name]").forEach((el) => {
     const k = fieldKey(el);
     if (k == null || !(k in fields)) return;
@@ -778,6 +817,7 @@ function endDraw() {
     if (lo >= W) { lo -= W; hi -= W; }
     const x1 = hi > W ? hi - W : hi;
     S.boxes[key] = { x0: lo, y0: Math.min(a[1], b[1]), x1, y1: Math.max(a[1], b[1]) };
+    S.userDrew[key] = true;
     const scanId = key.startsWith("aim:") ? key.slice(4) : null;
     if (scanId) delete S.aim[scanId];
   }
@@ -808,7 +848,7 @@ const actions = {
     return act(() => api(`/runs/${encodeURIComponent(el.dataset.id)}/cancel`, { method: "POST" }).then((r) => upsert(S.runs, r, "run_id")), "Cancelling");
   },
   draw: (el) => { S.drawMode[el.dataset.key] = el.dataset.on === "1"; render(true); },
-  "clear-box": (el) => { delete S.boxes[el.dataset.key]; render(true); },
+  "clear-box": (el) => { delete S.boxes[el.dataset.key]; S.userDrew[el.dataset.key] = true; render(true); },
   aim: (el) => {
     const id = el.dataset.id;
     const box = S.boxes[`aim:${id}`];
@@ -892,7 +932,10 @@ const forms = {
     for (const el of f.elements) {
       if (!el.name) continue;
       const v = el.value.trim();
-      input[el.name] = v !== "" && !isNaN(Number(v)) ? Number(v) : v;
+      let parsed = v;
+      if (v !== "" && !isNaN(Number(v))) parsed = Number(v);
+      else if (/^[[{]/.test(v)) { try { parsed = JSON.parse(v); } catch { /* keep the text */ } }
+      input[el.name] = parsed;
     }
     const box = S.boxes[f.dataset.key];
     if (box) input.box = box;

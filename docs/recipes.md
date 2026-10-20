@@ -407,6 +407,32 @@ curl -s -H "Authorization: Bearer $TOKEN" \
   becomes `done` a moment later, with the `input` object as its output, and
   the next step starts.
 
+### Proposals: the agent answers, a person confirms
+
+AI-first, the agent does a person step's work (finds the window on the
+preview, measures the opening) and a person only validates it. While a
+`person` step waits, anyone who may advance the run (its starter, an operator
+or an admin) can **propose** its input:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  -d '{"step_id":"box","input":{"box":{"x0":1666,"y0":250,"x1":40,"y1":687}},
+       "note":"Window on the right wall, framed with wall on every side"}' \
+  http://127.0.0.1:8795/v1/runs/$RUN/propose
+```
+
+- `input` must hold every field in `needs`, as for `advance`
+  (`400 invalid_request`); `note` is optional, at most 2000 characters.
+- The step keeps waiting. It gains `proposal`: `{input, by, at, note}`. A
+  newer proposal replaces an older one. The field log gets "<by> proposed an
+  answer for step …".
+- A person then advances the step as usual, usually with the proposal as is
+  (the web UI shows it with **Looks right**). The step's output then has
+  `proposal_accepted: true`, or `false` when the person changed any field in
+  `needs`, and the field log says which.
+- Another agent gets `403 forbidden`; a step that isn't waiting is
+  `409 conflict`.
+
 ### Cancelling a run
 
 ```bash

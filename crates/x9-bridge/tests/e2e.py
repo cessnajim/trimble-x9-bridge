@@ -310,12 +310,22 @@ try:
         s, g = call("POST", "/grants", "operator", {"project_id": pid, "expires_at": "2099-01-01T00:00:00Z", "max_scans": 1, "run_id": rid})
         s, b = call("POST", f"/runs/{rid}/advance", "agent", {"step_id": "box", "input": {}})
         check("advance without the box is refused", s == 400 and "box" in b.get("detail", ""), b)
-        s, b = call("POST", f"/runs/{rid}/advance", "agent", {"step_id": "box", "input": {"box": {"x0": 523, "y0": 418, "x1": 674, "y1": 564}}})
+        box = {"x0": 523, "y0": 418, "x1": 674, "y1": 564}
+        s, b = call("POST", f"/runs/{rid}/propose", "agent2", {"step_id": "box", "input": {"box": box}})
+        check("another agent can't propose in the run (403)", s == 403 and b["code"] == "forbidden", b)
+        s, b = call("POST", f"/runs/{rid}/propose", "agent", {"step_id": "box", "input": {}})
+        check("a proposal without the box is refused", s == 400 and "box" in b.get("detail", ""), b)
+        s, b = call("POST", f"/runs/{rid}/propose", "agent", {"step_id": "box", "input": {"box": box}, "note": "window found at the right of the overview"})
+        prop = {x["step_id"]: x for x in b["steps"]}["box"].get("proposal", {}) if s == 200 else {}
+        check("agent proposes the box; the step keeps waiting with the proposal", s == 200 and prop.get("input", {}).get("box") == box
+              and prop.get("by") == b["started_by"] and b["waiting_for"] == "input", b)
+        s, b = call("POST", f"/runs/{rid}/advance", "operator", {"step_id": "box", "input": {"box": box}})
         r = wait_run(rid, lambda r: r["current_step_id"] == "measure" and r["waiting_for"] == "input", timeout=240)
         steps = {x["step_id"]: x for x in r["steps"]}
         check("run aims, scans the close-up under its grant, exports and passes checks",
               r["current_step_id"] == "measure" and all(steps[k]["state"] == "done" for k in ("aim", "closeup", "export", "checks"))
               and steps["export"]["output"]["point_count"] == 777580, {k: v["state"] for k, v in steps.items()} if r else r)
+        check("the person's confirmation is recorded as accepting the proposal", steps["box"]["output"].get("proposal_accepted") is True, steps["box"])
         _, cj = call("GET", f"/jobs/{steps['closeup']['job_id']}", "viewer")
         check("close-up job carries the run id and ran without approval", cj.get("run_id") == rid and cj["state"] == "succeeded", cj)
         s, b = call("POST", f"/runs/{rid}/advance", "agent", {"step_id": "measure", "input": {"notes": "opening 1196 x 1168 mm"}})

@@ -54,6 +54,7 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/v1/runs", get(list_runs).post(start_run))
         .route("/v1/runs/:run_id", get(get_run))
         .route("/v1/runs/:run_id/advance", post(advance_run))
+        .route("/v1/runs/:run_id/propose", post(propose_run))
         .route("/v1/runs/:run_id/cancel", post(cancel_run))
         .route("/v1/jobs", get(list_jobs))
         .route("/v1/jobs/:job_id", get(get_job))
@@ -582,6 +583,25 @@ async fn advance_run(State(st): St, h: HeaderMap, Path(id): Path<String>, body: 
     crate::runs::may_steer(&st, &id, &c, "advance other people's runs")?;
     let a: Advance = parse(&body)?;
     Ok(Json(crate::runs::advance(&st, &id, &a.step_id, a.input)?))
+}
+
+#[derive(Deserialize)]
+struct Propose {
+    step_id: String,
+    input: Value,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+async fn propose_run(State(st): St, h: HeaderMap, Path(id): Path<String>, body: Bytes) -> ApiResult<Json<crate::runs::Run>> {
+    let c = st.require(&h, |r| r != Role::Viewer, "propose answers")?;
+    crate::runs::may_steer(&st, &id, &c, "propose answers in other people's runs")?;
+    let p: Propose = parse(&body)?;
+    let note = p.note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    if note.as_ref().is_some_and(|n| n.chars().count() > 2000) {
+        return Err(ApiError::invalid("note must be at most 2000 characters"));
+    }
+    Ok(Json(crate::runs::propose(&st, &id, &p.step_id, p.input, note, &c.name)?))
 }
 
 async fn cancel_run(State(st): St, h: HeaderMap, Path(id): Path<String>) -> ApiResult<Json<crate::runs::Run>> {

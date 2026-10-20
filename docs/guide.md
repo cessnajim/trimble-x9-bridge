@@ -844,7 +844,7 @@ stops and deletes.
 | Tab | What you see and do |
 | --- | --- |
 | **Now** | Battery, level, moved-since-last-scan, storage. **Needs you**: scan requests waiting for approval (with mode, project, window and note) and runs waiting for a person. What is running, with phase, progress and Stop. Recent jobs; a cancelled scan links to its partial scan. New full-dome scan. |
-| **Runs** | Start a recipe (project and inputs). Each run's steps, what it waits for, and its problem if it failed. A `person` step shows its instructions and a form for its `needs`; a `box` need shows the `preview_of` step's preview to draw on. Cancel a run. |
+| **Runs** | Start a recipe (project and inputs). Each run's steps, what it waits for, and its problem if it failed. A `person` step shows its instructions and a form for its `needs`; a `box` need shows the `preview_of` step's preview to draw on. When the agent has proposed an answer, the step shows it (the box on the preview, the values in the form, the agent's note) with **Looks right**; drawing a new box or editing a value changes it first. Cancel a run. |
 | **Scans** | Pick or create a project; scans grouped by station, area scans under their full dome. A scan: its preview, **aim** (draw a box, see the window in degrees, pick a mode, scan the area), **export** PLY or LAS with its checks and a download, download the raw `.tzf`, delete (operator). |
 | **Log** | The field log, newest first, and a note form. |
 
@@ -854,7 +854,9 @@ Things to know:
   polls `GET /status` every 5 s. The header dot says whether the stream is
   connected; it reconnects on its own.
 - Drawing a box: "Draw box" (the default) turns a drag on the preview into a
-  box; switch to "Pan" to scroll a wide panorama with a finger.
+  box; switch to "Pan" to scroll a wide panorama with a finger. The panorama
+  repeats after its end, so a box can cross the seam (sent as `x1 < x0`). A
+  proposed box opens in Pan, scrolled into view.
 - It asks before stopping a scan, cancelling a run or deleting a scan.
 - `GET /v1/whoami` tells it the caller's name and role.
 

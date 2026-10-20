@@ -628,6 +628,37 @@ paths:
               schema: { $ref: "#/components/schemas/Run" }
         default: { $ref: "#/components/responses/Problem" }
 
+  /runs/{run_id}/propose:
+    parameters: [{ $ref: "#/components/parameters/RunId" }]
+    post:
+      tags: [recipes]
+      operationId: proposeRunStep
+      summary: Propose a waiting person step's input for a person to confirm.
+      description: |
+        AI-first: the agent answers (a box on the preview, a measurement) and a
+        person validates it with `advanceRun`. The step keeps waiting and gains
+        `proposal`; a newer proposal replaces an older one. Same permission as
+        `advanceRun`. When the step is later advanced, its output carries
+        `proposal_accepted` (true when every `needs` field equals the proposal).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [step_id, input]
+              properties:
+                step_id: { type: string }
+                input: { type: object, additionalProperties: true }
+                note: { type: string, maxLength: 2000 }
+      responses:
+        "200":
+          description: Updated run.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Run" }
+        default: { $ref: "#/components/responses/Problem" }
+
   /runs/{run_id}/cancel:
     parameters: [{ $ref: "#/components/parameters/RunId" }]
     post:
@@ -1274,6 +1305,15 @@ components:
               state: { type: string, enum: [pending, running, waiting, done, failed, skipped] }
               job_id: { type: [string, "null"] }
               output: { type: object, additionalProperties: true }
+              proposal:
+                type: object
+                description: A waiting person step's input as proposed (usually by the agent), for a person to confirm.
+                required: [input, by, at]
+                properties:
+                  input: { type: object, additionalProperties: true }
+                  by: { type: string, description: Token name of the proposer. }
+                  at: { type: string, format: date-time }
+                  note: { type: string }
 
     LogEntry:
       type: object

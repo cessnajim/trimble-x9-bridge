@@ -27,6 +27,8 @@ trademarks of their respective owners.
 - **Recipes and runs:** TOML recipes of `action`, `person` and `check` steps;
   a run executes them under the starter's role.
 - **Field log** and a live event stream.
+- **Proposals:** the agent answers a person step (finds the window, measures it)
+  and a person confirms it with one tap.
 - **Phone web UI** at `/ui/`: approvals, live progress, recipe runs with box
   drawing on previews, aiming, exports and the log, from a phone in the field.
 

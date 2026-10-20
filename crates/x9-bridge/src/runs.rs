@@ -22,6 +22,19 @@ pub struct StepState {
     pub job_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
+    /// A person step's input as proposed by someone else (usually the agent),
+    /// for the person to confirm or change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<Proposal>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Proposal {
+    pub input: Value,
+    pub by: String,
+    pub at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,7 +106,7 @@ pub fn start(st: &Arc<AppState>, caller: Caller, recipe: Recipe, project_id: Str
         started_by: caller.name.clone(),
         created_at: now_rfc3339(),
         finished_at: None,
-        steps: recipe.steps.iter().map(|s| StepState { step_id: s.step_id.clone(), state: "pending".into(), job_id: None, output: None }).collect(),
+        steps: recipe.steps.iter().map(|s| StepState { step_id: s.step_id.clone(), state: "pending".into(), job_id: None, output: None, proposal: None }).collect(),
         problem: None,
     };
     let ctx = json!({"project_id": project_id, "input": inputs, "steps": {}});
@@ -122,22 +135,58 @@ fn may_steer_run(run: &Run, c: &Caller) -> bool {
     run.started_by == c.name || c.role.is_operator()
 }
 
-/// Supply a person step's input. Errors if the run isn't waiting there.
-pub fn advance(st: &AppState, run_id: &str, step_id: &str, input: Value) -> Result<Run, ApiError> {
-    let res = with_run(st, run_id, |rec| -> Result<Run, ApiError> {
-        let i = rec.run.steps.iter().position(|s| s.step_id == step_id).ok_or_else(|| ApiError::not_found("step"))?;
-        if rec.run.steps[i].state != "waiting" || rec.run.waiting_for.as_deref() != Some("input") {
-            return Err(ApiError::conflict(format!("step {step_id:?} is not waiting for input")));
-        }
-        let missing: Vec<&String> = rec.recipe.steps[i].needs.iter().filter(|n| input.get(n.as_str()).is_none()).collect();
-        if !missing.is_empty() {
-            return Err(ApiError::invalid(format!("missing: {}", missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))));
+/// The waiting person step `step_id`, with `input` holding every field it needs.
+fn waiting_step(rec: &RunRecord, step_id: &str, input: &Value) -> Result<usize, ApiError> {
+    let i = rec.run.steps.iter().position(|s| s.step_id == step_id).ok_or_else(|| ApiError::not_found("step"))?;
+    if rec.run.steps[i].state != "waiting" || rec.run.waiting_for.as_deref() != Some("input") {
+        return Err(ApiError::conflict(format!("step {step_id:?} is not waiting for input")));
+    }
+    if !input.is_object() {
+        return Err(ApiError::invalid("input must be an object"));
+    }
+    let missing: Vec<&String> = rec.recipe.steps[i].needs.iter().filter(|n| input.get(n.as_str()).is_none()).collect();
+    if !missing.is_empty() {
+        return Err(ApiError::invalid(format!("missing: {}", missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))));
+    }
+    Ok(i)
+}
+
+/// Supply a person step's input. Errors if the run isn't waiting there. When
+/// the step had a proposal, its output records whether it was accepted as is.
+pub fn advance(st: &AppState, run_id: &str, step_id: &str, mut input: Value) -> Result<Run, ApiError> {
+    let res = with_run(st, run_id, |rec| -> Result<(Run, Option<(String, bool)>), ApiError> {
+        let i = waiting_step(rec, step_id, &input)?;
+        let verdict = rec.run.steps[i].proposal.as_ref().map(|p| {
+            let same = rec.recipe.steps[i].needs.iter().all(|n| input.get(n.as_str()) == p.input.get(n.as_str()));
+            (p.by.clone(), same)
+        });
+        if let Some((_, same)) = &verdict {
+            input["proposal_accepted"] = json!(same);
         }
         rec.advance = Some((step_id.to_string(), input));
         rec.wake.notify_one();
+        Ok((rec.run.clone(), verdict))
+    });
+    let (run, verdict) = res.ok_or_else(|| ApiError::not_found("run"))??;
+    if let Some((by, same)) = verdict {
+        let text = if same { format!("Step {step_id:?}: {by}'s proposal accepted") } else { format!("Step {step_id:?}: {by}'s proposal changed by a person") };
+        st.log("run", text, "bridge", Some(&run.project_id), &[("run_id", run_id), ("step_id", step_id)]);
+    }
+    Ok(run)
+}
+
+/// Propose a waiting person step's input (an agent's box, a measurement) for
+/// a person to confirm or change. The step keeps waiting; a newer proposal
+/// replaces an older one.
+pub fn propose(st: &AppState, run_id: &str, step_id: &str, input: Value, note: Option<String>, by: &str) -> Result<Run, ApiError> {
+    let res = with_run(st, run_id, |rec| -> Result<Run, ApiError> {
+        let i = waiting_step(rec, step_id, &input)?;
+        rec.run.steps[i].proposal = Some(Proposal { input, by: by.to_string(), at: now_rfc3339(), note });
         Ok(rec.run.clone())
     });
-    res.ok_or_else(|| ApiError::not_found("run"))?
+    let run = res.ok_or_else(|| ApiError::not_found("run"))??;
+    st.log("run", format!("{by} proposed an answer for step {step_id:?}; waiting for a person to confirm"), by, Some(&run.project_id), &[("run_id", run_id), ("step_id", step_id)]);
+    Ok(run)
 }
 
 /// Ask a run to stop. Its job in flight is cancelled too: a scan or an export
