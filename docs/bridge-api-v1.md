@@ -148,6 +148,8 @@ operator token for approvals.
 | Grant (2 × STD_L2), two area scans by the agent | Both queued without asking, ran back to back: 102.4 s and 76.5 s; filed as area scans under station 1 |
 | Field log | Request, scanner start and geometry-ready entries recorded |
 
+Cancel on the real X9 (2026-10-20, field Pi over the scanner's Wi-Fi): `POST /jobs/{id}/cancel` during the sweep stopped the scanner; the job read `cancelled` within a second, while the scanner's own task took 13 s more to clear; a scan queued in that window fails with `scanner_busy` (it should wait instead). The scanner still files the partial sweep as a scan; the job does not point at it yet.
+
 Found and fixed: approval / cancel / finish log entries lacked the project id;
 default port moved from 8790 (taken on the Fedora box) to 8795.
 

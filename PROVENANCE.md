@@ -43,7 +43,7 @@ two-team clean-room process.
 | `GET /tasks`: `initializing` → `running`, `percentage` 0 → 1 during the sweep, then steps of 1/30 during color images | Polled at 1–2 Hz through full and area scans |
 | Scan files `project/N.tzf`; area scans filed as `N_k.tzf` under station N | Read from `/scans` after each scan |
 | `GET /tzfs/{id}/file` and `/tzfs/{id}/preview`; the preview is grid-aligned | Downloaded many times; previews matched the grid (template match 0.974; area previews equal the grid size) |
-| `DELETE /tasks/{id}` stops a running task | **Not yet confirmed on our scanner** in these tests (exercised against the simulator only) |
+| `DELETE /tasks/{id}` stops a running task | Cancelled an HS_L1 full dome 5 s into the sweep (2026-10-20, over Wi-Fi): the sweep stopped at ~5 %, `/tasks` emptied 13 s later (`exitResult` stayed `none`), and the scanner still filed a scan record with the partial sweep (69,552 points, a valid `.tzf`) |
 
 The `.tzf` file format is handled by the separate
 [trimble-tzf](https://github.com/cessnajim/trimble-tzf) project, which has its
