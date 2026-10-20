@@ -69,6 +69,25 @@ paths:
                   ok: { type: boolean }
                   version: { type: string }
 
+  /whoami:
+    get:
+      tags: [system]
+      operationId: whoAmI
+      summary: The caller's token name and role.
+      description: Lets a client show only what the caller may do.
+      responses:
+        "200":
+          description: The caller.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name, role]
+                properties:
+                  name: { type: string }
+                  role: { type: string, enum: [viewer, agent, operator, admin] }
+        default: { $ref: "#/components/responses/Problem" }
+
   /status:
     get:
       tags: [system]
@@ -1005,6 +1024,12 @@ components:
             Cancelled scan jobs only: the scan the scanner filed from the
             partial sweep. Set shortly after the cancel, once the scanner
             files it (a `job` event announces the change).
+        request:
+          $ref: "#/components/schemas/ScanRequest"
+          description: Scan jobs only, the request as admitted, so a person can see what they approve.
+        project_name:
+          type: string
+          description: Scan jobs only, the name of the project the scan goes into.
 
     ScanRef:
       type: object

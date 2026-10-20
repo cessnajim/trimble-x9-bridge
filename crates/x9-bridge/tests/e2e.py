@@ -126,6 +126,22 @@ try:
     s, b = call("GET", "/status", "viewer")
     check("status maps the scanner", s == 200 and b["scanner"]["connected"] and b["scanner"]["battery_pct"] == 87
           and b["scanner"]["leveling"]["state"] == "ok", b)
+    s, b = call("GET", "/whoami", "agent")
+    check("whoami names the caller and role", s == 200 and b["role"] == "agent", b)
+
+    def page(path):
+        try:
+            with urllib.request.urlopen(f"http://{BRIDGE}{path}", timeout=10) as r:
+                return r.status, r.headers.get("content-type", ""), r.read().decode("utf-8", "replace"), r.url
+        except urllib.error.HTTPError as e:
+            return e.code, "", "", path
+    st, ct, body, url = page("/")
+    check("/ leads to the web UI without a token", st == 200 and url.endswith("/ui/") and "app.js" in body, (st, url))
+    st, ct, body, _ = page("/ui/app.js")
+    check("web UI script is served", st == 200 and "javascript" in ct and "/whoami" in body, (st, ct))
+    st, ct, body, _ = page("/ui/nope.js")
+    check("unknown web UI file is 404", st == 404, st)
+
     s, b = call("GET", "/scan-modes", "viewer")
     check("scan modes are translated", s == 200 and any(m["mode"] == "STD_L2" and m["fixed_seconds"] == 42 for m in b), b)
 
@@ -166,6 +182,8 @@ try:
           len(tasks) == 1 and tasks[0]["exitResult"] == "none", tasks)
     s, job = call("POST", "/scans", "agent", dome)
     check("agent scan waits for approval", s == 202 and job["state"] == "awaiting_approval", job)
+    check("a waiting scan shows its request and project", job.get("request", {}).get("mode") == dome["mode"]
+          and job.get("project_name") == "e2e-window", job)
     s, b = call("POST", f"/jobs/{job['job_id']}/approve", "agent")
     check("agent can't approve (403)", s == 403, b)
     s, b = call("POST", f"/jobs/{job['job_id']}/approve", "operator")

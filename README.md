@@ -27,12 +27,14 @@ trademarks of their respective owners.
 - **Recipes and runs:** TOML recipes of `action`, `person` and `check` steps;
   a run executes them under the starter's role.
 - **Field log** and a live event stream.
+- **Phone web UI** at `/ui/`: approvals, live progress, recipe runs with box
+  drawing on previews, aiming, exports and the log, from a phone in the field.
 
 ## Documentation
 
 | Document | What |
 | --- | --- |
-| [docs/guide.md](docs/guide.md) | Install, configuration, tokens and roles, and every workflow with `curl` examples: scans, approvals, grants, cancel, aiming, exports, deletes, field log, events |
+| [docs/guide.md](docs/guide.md) | Install, configuration, tokens and roles, every workflow with `curl` examples (scans, approvals, grants, cancel, aiming, exports, deletes, field log, events), and the phone web UI |
 | [docs/recipes.md](docs/recipes.md) | Recipe format v0 and how runs execute |
 | [docs/errors.md](docs/errors.md) | Every error `code`, its HTTP status, when it happens and its hint |
 | [docs/tools.md](docs/tools.md) | The `x9` CLI, the `x9-mock` simulator, and the tests |

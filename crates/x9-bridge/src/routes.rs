@@ -31,7 +31,12 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn router(st: Arc<AppState>) -> Router {
     Router::new()
+        .route("/", get(crate::ui::to_ui))
+        .route("/ui", get(crate::ui::to_ui))
+        .route("/ui/", get(crate::ui::index))
+        .route("/ui/:file", get(crate::ui::asset))
         .route("/v1/health", get(health))
+        .route("/v1/whoami", get(whoami))
         .route("/v1/status", get(status))
         .route("/v1/rules", get(rules))
         .route("/v1/scan-modes", get(scan_modes))
@@ -67,6 +72,12 @@ fn parse<T: for<'de> Deserialize<'de>>(body: &Bytes) -> ApiResult<T> {
 
 async fn health() -> Json<Value> {
     Json(json!({"ok": true, "version": VERSION}))
+}
+
+/// The caller's token name and role, so a client can show what it may do.
+async fn whoami(State(st): St, h: HeaderMap) -> ApiResult<Json<Value>> {
+    let c = st.caller(&h)?;
+    Ok(Json(json!({"name": c.name, "role": c.role})))
 }
 
 async fn status(State(st): St, h: HeaderMap) -> ApiResult<Json<Value>> {
@@ -215,6 +226,8 @@ pub async fn submit_scan(st: &Arc<AppState>, c: &crate::model::Caller, req: Scan
             result: None,
             problem: None,
             partial_scan_id: None,
+            request: Some(req.clone()),
+            project_name: project.project_name.clone(),
         };
         inner.jobs.push(JobRecord {
             job: job.clone(),
@@ -477,6 +490,8 @@ pub async fn submit_export(st: &Arc<AppState>, c: &crate::model::Caller, scan_id
         result: None,
         problem: None,
         partial_scan_id: None,
+        request: None,
+        project_name: None,
     };
     st.inner.lock().unwrap().jobs.push(JobRecord {
         job: job.clone(),

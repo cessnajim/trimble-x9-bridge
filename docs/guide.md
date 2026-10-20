@@ -22,8 +22,9 @@ Related documents:
 5. [Roles](#roles)
 6. [Conventions](#conventions)
 7. [Workflows](#workflows)
-8. [Events](#events)
-9. [Data directory and state](#data-directory-and-state)
+8. [Phone web UI](#phone-web-ui)
+9. [Events](#events)
+10. [Data directory and state](#data-directory-and-state)
 
 ## What the bridge is
 
@@ -804,6 +805,58 @@ curl -s -X POST -H "$H" $B/runs/$RUN/cancel
 
 Only the run's starter, an operator or an admin may advance or cancel it;
 another agent gets `403 forbidden`.
+
+## Phone web UI
+
+The bridge serves a small web app at `/ui/` (and redirects `/` there): the
+same API, for a person in the field with a phone. It is built into the
+`x9-bridge` binary, needs no internet, and loads nothing from anywhere else.
+
+### Reaching it
+
+The phone has to reach the bridge over the network, so the bridge must listen
+beyond the machine it runs on. Set `BRIDGE_ADDR` (for the service, in
+`/etc/x9-bridge/env`) to `0.0.0.0:8795` or to one interface's address. Every
+API call still needs a token; the page itself loads without one.
+
+| Field setup | Phone joins | Opens |
+| --- | --- | --- |
+| Scanner on USB to the bridge computer; the bridge computer runs its own Wi-Fi hotspot | The hotspot | `http://<hotspot address>:8795/ui/` (NetworkManager's shared hotspot is `10.42.0.1`) |
+| Scanner on its own Wi-Fi; the bridge computer joined it | The scanner's Wi-Fi | `http://<bridge computer's address on that network>:8795/ui/`, or its mDNS name if the network passes mDNS |
+| At the desk | The same LAN as the bridge computer | `http://<its LAN address or mDNS name>:8795/ui/` |
+
+The traffic is plain HTTP, so it is only as private as the network it
+crosses: use it on the scanner's or hotspot's own WPA2 network, not an open
+one.
+
+### Signing in
+
+Paste a token from the token file, or open a link with the token in it:
+`http://<bridge>:8795/ui/?token=<token>` (for example from a QR code). The
+token is kept on the phone (`localStorage`) and removed from the address bar.
+The header shows who you are signed in as; tap it to sign out. The role
+decides what the app offers, exactly as in [Roles](#roles): a `viewer` only
+looks; an `agent`'s scans wait for approval; an `operator` approves, denies,
+stops and deletes.
+
+### What it does
+
+| Tab | What you see and do |
+| --- | --- |
+| **Now** | Battery, level, moved-since-last-scan, storage. **Needs you**: scan requests waiting for approval (with mode, project, window and note) and runs waiting for a person. What is running, with phase, progress and Stop. Recent jobs; a cancelled scan links to its partial scan. New full-dome scan. |
+| **Runs** | Start a recipe (project and inputs). Each run's steps, what it waits for, and its problem if it failed. A `person` step shows its instructions and a form for its `needs`; a `box` need shows the `preview_of` step's preview to draw on. Cancel a run. |
+| **Scans** | Pick or create a project; scans grouped by station, area scans under their full dome. A scan: its preview, **aim** (draw a box, see the window in degrees, pick a mode, scan the area), **export** PLY or LAS with its checks and a download, download the raw `.tzf`, delete (operator). |
+| **Log** | The field log, newest first, and a note form. |
+
+Things to know:
+
+- It follows the [event stream](#events) for jobs, runs and log entries and
+  polls `GET /status` every 5 s. The header dot says whether the stream is
+  connected; it reconnects on its own.
+- Drawing a box: "Draw box" (the default) turns a drag on the preview into a
+  box; switch to "Pan" to scroll a wide panorama with a finger.
+- It asks before stopping a scan, cancelling a run or deleting a scan.
+- `GET /v1/whoami` tells it the caller's name and role.
 
 ## Events
 

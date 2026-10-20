@@ -157,6 +157,12 @@ pub struct Job {
     /// Cancelled scan jobs: the scan the scanner filed from the partial sweep.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub partial_scan_id: Option<String>,
+    /// Scan jobs: the request as admitted, so a person can see what they approve.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request: Option<ScanRequest>,
+    /// The project the job works in, by name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

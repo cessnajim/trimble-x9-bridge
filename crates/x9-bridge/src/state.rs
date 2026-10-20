@@ -202,6 +202,8 @@ mod tests {
                 result: None,
                 problem: None,
                 partial_scan_id: None,
+                request: None,
+                project_name: None,
             },
             request: None,
             project_id: "p1".into(),

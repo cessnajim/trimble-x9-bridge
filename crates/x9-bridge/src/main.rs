@@ -23,6 +23,7 @@ mod routes;
 mod rules;
 mod runs;
 mod state;
+mod ui;
 mod util;
 mod worker;
 
