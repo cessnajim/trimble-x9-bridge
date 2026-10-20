@@ -107,10 +107,12 @@ Unparsable numbers fall back to the default.
 ### What it simulates
 
 Routes: `GET /status`, `GET`/`POST /scans`, `GET /scans/modes`,
-`DELETE /scans/{id}`, `GET`/`POST /projects`, `GET /tasks`,
-`DELETE /tasks/{id}`, `GET /tzfs/{id}/file`, `GET /tzfs/{id}/preview`,
-`GET /errors`, `GET /diagnostics`. `GET /scans/{id}` and `GET /tzfs/{id}` are
-not simulated (so `x9 scan` and `x9 tzf` fail against it).
+`GET`/`DELETE /scans/{id}`, `GET`/`POST /projects`, `GET /tasks`,
+`DELETE /tasks/{id}`, `GET /tzfs/{id}` (the `tzf` object `/scans` embeds),
+`GET /tzfs/{id}/file`, `GET /tzfs/{id}/preview`, `GET /errors`,
+`GET /diagnostics`. Every CLI command works against it. Item routes take the
+positional ids (`id` and `tzfId` in `/scans`) and answer `404` for an id the
+mock does not have.
 
 Start state: one project, `mock_project`, with one full-dome scan
 `mock_project/1.tzf`. Status: levelled, compensator on, not moved,
@@ -189,18 +191,23 @@ needs only Python 3's standard library. It:
   directory with the window recipe and one broken recipe;
 - starts the bridge on `127.0.0.1:8799` with `BRIDGE_POLL_MS=200` and a
   temporary `BRIDGE_DATA`, and later a second bridge on `127.0.0.1:8798`
-  whose scanner is unreachable;
+  whose scanner is unreachable and a third on `127.0.0.1:8797` whose
+  `BRIDGE_DATA` cannot be written;
+- runs `x9 scan` and `x9 tzf` from the same directory against the simulator;
 - listens to the event stream, walks the main flows, and prints `PASS` or
   `FAIL` per check, then `N/M checks passed`. It exits with `1` if any check
   failed.
 
-Those ports must be free. Without fixtures it runs 48 checks: health and
+Those ports must be free. Without fixtures it runs 65 checks: health and
 auth, status and modes, projects, refusals (viewer, missing window, unknown
 mode), another client's task (`scanner_busy`), the echo check, approval, scan
-phases, waiting out a cancelled task, grants and area scans, recipe listing
-and validation, a run waiting for approval and cancelled, cancel mid-sweep with
-`partial_scan_id`, confirmed deletes, the field log, events, and a
-disconnected scanner.
+phases, waiting out a cancelled task, grants (and a cancelled scan giving its
+use back) and area scans, recipe listing and validation, a run waiting for
+approval, who may advance and cancel it, `addLogNote` text, cancel mid-sweep
+with `partial_scan_id`, the scan file cache (served while listed, evicted on
+delete or when the scanner no longer lists the scan), confirmed deletes,
+`scanner_error` and `cache_error`, the field log, events, a disconnected
+scanner, and `x9 scan` / `x9 tzf` against the simulator.
 
 ### `E2E_FIXTURES`
 
@@ -210,9 +217,12 @@ E2E_FIXTURES=/path/to/fixtures python3 crates/x9-bridge/tests/e2e.py target/rele
 
 `E2E_FIXTURES` names a directory with `dome.tzf`, `dome.jpg`, `area.tzf` and
 `area.jpg`: a real full-dome scan with its preview, and a real area scan with
-its preview. It is passed to the simulator as `X9_MOCK_FIXTURES`, and adds 14
-checks (62 in all): previews and scan files through the bridge, aiming,
-PLY and LAS exports with their checks, and a full run of the window recipe.
+its preview. It is passed to the simulator as `X9_MOCK_FIXTURES`. It adds 17
+checks and skips the 2 that need a scanner without files (80 in all):
+previews and scan files through the bridge, aiming, PLY and LAS exports with
+their checks, a running export not counted as the scanner's job, cancelling
+an export, a delete removing the scan's exports, and a full run of the window
+recipe.
 
 The fixture checks compare against the author's own scans, which are not in
 the repository: the aim check expects one particular window, and the export

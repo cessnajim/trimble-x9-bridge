@@ -195,7 +195,7 @@ Writes a `note` to the field log. Runs at once.
 
 | Argument | What |
 | --- | --- |
-| `text` | The note. Not validated: a missing `text` writes an empty note. |
+| `text` | The note: 1–4000 characters, not only spaces, as for `POST /log`. A missing, empty or too long `text` fails the run with `invalid_request` (`step "<id>": text must be 1–4000 characters`). |
 
 The entry's author is the starter's token name, its project is the run's
 project, and `refs` holds the `run_id`. Output: `{"entry_id": "log_…"}`.
@@ -362,8 +362,14 @@ A run executes **under the role and name of whoever started it**:
 - A grant with `run_id` set covers only scans from that run. A grant without
   `run_id` covers matching scans from any run and from direct requests.
 
-Advancing or cancelling a run does not change whose run it is. Any token
-except `viewer` can advance or cancel any run, not only the starter.
+Only the starter (the same token name), an `operator` or an `admin` may
+advance or cancel a run. Another `agent` gets `403 forbidden` ("Your role
+can't advance other people's runs" / "… cancel other people's runs"), and a
+`viewer` cannot do either. The ownership check comes before the request body
+is read, so another agent's malformed `advance` is also `forbidden`.
+Advancing or cancelling a run does not change whose run it is: an operator
+who hands in a person step's input leaves the run, and its later scans, under
+the starter's name and role.
 
 ### Waiting for approval
 
@@ -389,6 +395,8 @@ curl -s -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:8795/v1/runs/$RUN/advance
 ```
 
+- Only the starter, an operator or an admin may advance (see
+  [Whose run it is](#whose-run-it-is)).
 - `step_id` must be the step that is waiting. An unknown step is
   `404 not_found` ("No such step"); a step that is not waiting for input is
   `409 conflict`.
@@ -405,11 +413,14 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 curl -s -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8795/v1/runs/$RUN/cancel
 ```
 
+- Only the starter, an operator or an admin may cancel (see
+  [Whose run it is](#whose-run-it-is)).
 - If the current step has a job: a `queued` or `awaiting_approval` job is
-  cancelled at once; a running scan is stopped exactly as with
-  `POST /jobs/{id}/cancel` (the scanner is told to stop, and a partial scan
-  may be kept as `partial_scan_id`). A running export cannot be stopped: the
-  run is cancelled when the export ends.
+  cancelled at once (a granted scan gets its grant use back); a running scan
+  is stopped exactly as with `POST /jobs/{id}/cancel` (the scanner is told to
+  stop, and a partial scan may be kept as `partial_scan_id`). A running
+  export stops at its next check, as with `POST /jobs/{id}/cancel`, leaving
+  no export file; the run is cancelled as soon as it has.
 - A waiting `person` step is released at once.
 - An `aimFromPreview` or `addLogNote` step finishes first; the run is
   cancelled before the next step.

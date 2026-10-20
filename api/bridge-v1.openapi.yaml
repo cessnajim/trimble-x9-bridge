@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: X9 bridge API
-  version: 1.0.0-draft.2
+  version: 1.0.0-draft.3
   summary: The one API every client uses to reach a Trimble X9 scanner.
   description: |
     The bridge service runs next to the scanner (a Pi on the tripod or a desk
@@ -170,10 +170,11 @@ paths:
       description: |
         Admission runs every rule. A request no rule blocks is queued; a scan
         from an `agent` token is held as `awaiting_approval` unless an active
-        grant covers it. `viewer` tokens are refused. Right before the scanner
-        starts, the worker checks connection, battery and storage again, and
-        that the scanner is idle (a task the bridge cancelled itself is waited
-        out, up to 60 s).
+        grant covers it. `viewer` tokens are refused (`403 forbidden`, checked
+        before the body, so even a malformed request gets it). Right before
+        the scanner starts, the worker checks connection, battery and storage
+        again, and that the scanner is idle (a task the bridge cancelled itself
+        is waited out, up to 60 s, in phase `waiting`).
       requestBody:
         required: true
         content:
@@ -206,7 +207,9 @@ paths:
       description: |
         Needs an `operator` or `admin` token (`403 forbidden`) and an
         `X-Confirm` header equal to `scan_id` (`412 confirm_mismatch`). The
-        bridge's cached copy of the scan file and preview is kept.
+        bridge also removes its cached copy of the scan file and preview and
+        the exports made from the scan since it started; afterwards all of
+        them are `404 not_found`.
       parameters: [{ $ref: "#/components/parameters/Confirm" }]
       responses:
         "204": { description: Deleted. }
@@ -232,6 +235,11 @@ paths:
       tags: [scans]
       operationId: getScanTzf
       summary: The raw scan file.
+      description: |
+        Downloaded once and cached. Like the preview, it is served only while
+        the scanner lists the scan: each request asks the scanner first
+        (`404 not_found` once it is gone, `503 scanner_disconnected` when the
+        scanner cannot be reached).
       responses:
         "200":
           description: TZF bytes.
@@ -309,9 +317,11 @@ paths:
         `partial_scan_id` and the field log says so; keep or delete that scan.
         A `queued` or `awaiting_approval` job is cancelled at once; for a
         running scan the answer may still read `running` until the worker's
-        next poll. Export jobs cannot be stopped: the request is accepted and
-        the export runs to the end. `agent` tokens may cancel only jobs they
-        requested.
+        next poll. A running export stops at its next check (during the
+        download, between decoding and writing, or while writing) and reads
+        `cancelled` with no export file. A granted scan cancelled before the
+        scanner starts it gives its grant use back. `agent` tokens may cancel
+        only jobs they requested.
       responses:
         "200":
           description: The job (cancelled, cancelling, or unchanged if already finished).
@@ -355,8 +365,9 @@ paths:
         A grant lets `agent` scans within its limits queue without approval,
         for example "up to 12 scans in project P for the next 2 hours".
         Exports need no approval, so grants cover scans only. A grant never
-        covers deletes. `scans_used` counts scans queued under it and is not
-        given back when a job fails or is cancelled.
+        covers deletes. `scans_used` counts scans queued under it. A use is
+        given back when the job is cancelled before the scanner starts it, but
+        not when a job fails or is cancelled later.
       requestBody:
         required: true
         content:
@@ -575,6 +586,9 @@ paths:
       tags: [recipes]
       operationId: advanceRun
       summary: Complete the current step that waits on someone (a choice, a confirmation, a box on the preview).
+      description: |
+        Only the run's starter (same token name), an `operator` or an `admin`;
+        another `agent` gets `403 forbidden`, checked before the body is read.
       requestBody:
         required: true
         content:
@@ -600,7 +614,10 @@ paths:
     post:
       tags: [recipes]
       operationId: cancelRun
-      summary: Stop a run; a scan in flight is cancelled too.
+      summary: Stop a run; a scan or export in flight is cancelled too.
+      description: |
+        Only the run's starter (same token name), an `operator` or an `admin`;
+        another `agent` gets `403 forbidden`.
       responses:
         "200":
           description: The run (it settles to `cancelled` shortly).
@@ -677,9 +694,10 @@ components:
       description: |
         One token per user or device, from the bridge's token file. Each token
         has a role: `viewer` (read only, plus `POST /aim`), `agent` (read,
-        queue work; scans need approval or a grant; cancel only its own jobs),
-        `operator` (everything an agent can, plus approvals, grants, cancelling
-        any job and confirmed deletes) or `admin`. In this version `admin` has
+        queue work; scans need approval or a grant; cancel only its own jobs;
+        advance or cancel only runs it started), `operator` (everything an
+        agent can, plus approvals, grants, cancelling any job, steering any
+        run and confirmed deletes) or `admin`. In this version `admin` has
         exactly the rights of `operator`; changing rule settings and tokens
         over the API is planned.
 
@@ -726,9 +744,10 @@ components:
           type: string
           description: |
             See `docs/errors.md`. `needs_approval` and `worker_unavailable` are
-            planned and never returned in this version. `conflict` is also used
-            with status 502 when the scanner answers a request with an error
-            status other than 409.
+            planned and never returned in this version. `scanner_error` (502)
+            is the scanner answering with an error status other than 409;
+            `cache_error` (500) is the bridge failing to read or write its own
+            files.
           enum:
             - unauthorized
             - forbidden
@@ -736,6 +755,8 @@ components:
             - invalid_request
             - scanner_disconnected
             - scanner_busy
+            - scanner_error
+            - cache_error
             - instrument_moved
             - battery_low
             - storage_low
@@ -774,7 +795,7 @@ components:
             busy: { type: boolean, description: The scanner reports a current task (from any client). }
             current_job_id:
               type: [string, "null"]
-              description: The bridge's job in state `running` (a scan, or an export, which also runs).
+              description: The bridge's scan job in state `running`. Exports run beside the scanner and never show here.
             battery_pct: { type: integer, minimum: 0, maximum: 100 }
             on_ac_power: { type: boolean }
             storage_free_bytes: { type: integer }
@@ -957,10 +978,10 @@ components:
         phase:
           type: string
           description: >-
-            Scans: `leveling` (also while waiting for the scanner to clear a
-            task the bridge cancelled), `sweeping`, `imaging` (color only).
+            Scans: `waiting` (for the scanner to clear a task the bridge
+            cancelled), `leveling`, `sweeping`, `imaging` (color only).
             Exports: `downloading`, `decoding`. Absent once the job finishes.
-          enum: [leveling, sweeping, imaging, downloading, decoding]
+          enum: [waiting, leveling, sweeping, imaging, downloading, decoding]
         progress:
           type: number
           minimum: 0

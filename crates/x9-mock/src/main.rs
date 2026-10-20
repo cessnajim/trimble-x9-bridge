@@ -71,9 +71,10 @@ async fn main() {
         .route("/api/v1/status", get(status))
         .route("/api/v1/scans", get(scans).post(launch_scan))
         .route("/api/v1/scans/modes", get(scan_modes))
-        .route("/api/v1/scans/:id", delete(delete_scan))
+        .route("/api/v1/scans/:id", get(scan).delete(delete_scan))
         .route("/api/v1/projects", get(projects).post(create_project))
         .route("/api/v1/tasks", get(tasks))
+        .route("/api/v1/tzfs/:id", get(tzf))
         .route("/api/v1/tzfs/:id/file", get(tzf_file))
         .route("/api/v1/tzfs/:id/preview", get(tzf_preview))
         .route("/api/v1/tasks/:id", delete(cancel_task))
@@ -119,6 +120,18 @@ async fn create_project(State(m): State<Shared>, Json(body): Json<Value>) -> (St
 
 async fn scans(State(m): State<Shared>) -> Json<Value> {
     Json(Value::Array(m.lock().unwrap().scans.clone()))
+}
+
+/// GET /scans/{id}: one scan by its (positional) id.
+async fn scan(State(m): State<Shared>, Path(id): Path<i64>) -> Result<Json<Value>, StatusCode> {
+    let g = m.lock().unwrap();
+    g.scans.iter().find(|s| s["id"].as_i64() == Some(id)).cloned().map(Json).ok_or(StatusCode::NOT_FOUND)
+}
+
+/// GET /tzfs/{id}: a scan file's metadata (the `tzf` object `/scans` embeds).
+async fn tzf(State(m): State<Shared>, Path(id): Path<i64>) -> Result<Json<Value>, StatusCode> {
+    let g = m.lock().unwrap();
+    g.scans.iter().find(|s| s["tzfId"].as_i64() == Some(id)).map(|s| Json(s["tzf"].clone())).ok_or(StatusCode::NOT_FOUND)
 }
 
 async fn scan_modes() -> Json<Value> {
@@ -368,6 +381,29 @@ mod tests {
         assert_eq!(g.scans.len(), 1);
         assert_eq!(g.scans[0]["tzf"]["file"], "p/1.tzf");
         assert_eq!(g.scans[0]["tzf"]["nbPoints"], 6_281_859 / 2);
+    }
+
+    #[tokio::test]
+    async fn scan_and_tzf_items_follow_the_positional_ids() {
+        let m = mock(task("running", 0.5));
+        {
+            let mut g = m.lock().unwrap();
+            g.task = None;
+            let req = json!({"scanMode": "STD_L0", "scanType": "FullDome", "projectName": "p"});
+            file_scan(&mut g, &req, 10);
+            file_scan(&mut g, &req, 20);
+        }
+        let Json(s) = scan(State(m.clone()), Path(1)).await.unwrap();
+        assert_eq!(s["tzf"]["file"], "p/2.tzf");
+        let Json(t) = tzf(State(m.clone()), Path(1)).await.unwrap();
+        assert_eq!((t["id"].as_i64(), t["nbPoints"].as_u64()), (Some(1), Some(20)));
+        assert_eq!(scan(State(m.clone()), Path(2)).await.unwrap_err(), StatusCode::NOT_FOUND);
+        assert_eq!(tzf(State(m.clone()), Path(2)).await.unwrap_err(), StatusCode::NOT_FOUND);
+        // After a delete the survivor is renumbered to 0.
+        assert_eq!(delete_scan(State(m.clone()), Path(0)).await, StatusCode::OK);
+        let Json(s) = scan(State(m.clone()), Path(0)).await.unwrap();
+        assert_eq!(s["tzf"]["file"], "p/2.tzf");
+        assert_eq!(tzf(State(m.clone()), Path(1)).await.unwrap_err(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

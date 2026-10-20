@@ -5,14 +5,16 @@ usage: e2e.py <target/release dir>
 Starts the mock and the bridge on spare ports, walks the main flows, and
 prints PASS/FAIL per check. Exit code 1 if anything failed.
 """
-import json, os, subprocess, sys, tempfile, threading, time, urllib.request, urllib.error
+import json, os, re, subprocess, sys, tempfile, threading, time, uuid, urllib.request, urllib.error
 
 BIN = sys.argv[1]
 MOCK, BRIDGE = "127.0.0.1:34599", "127.0.0.1:8799"
 # Optional real scans for file / aim / export checks: a directory with
 # dome.tzf + dome.jpg (the 2026-10-19 full dome) and area.tzf + area.jpg.
 FIX = os.environ.get("E2E_FIXTURES")
-TOK = {"viewer": "viewer-token-0123456789", "agent": "agent-token-0123456789", "operator": "operator-token-0123456789"}
+TOK = {"viewer": "viewer-token-0123456789", "agent": "agent-token-0123456789", "agent2": "agent2-token-0123456789",
+       "operator": "operator-token-0123456789"}
+ROLE = {"agent2": "agent"}  # a second agent, to check what one may do to another's work
 results = []
 
 def check(name, cond, detail=""):
@@ -77,12 +79,15 @@ recipes = os.path.join(tmp, "recipes")
 os.makedirs(recipes)
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "recipes", "window-measurement.toml")) as f:
     open(os.path.join(recipes, "window-measurement.toml"), "w").write(f.read())
+open(os.path.join(recipes, "log-note.toml"), "w").write('id = "log-note"\ntitle = "Note"\nversion = "1"\n'
+    '[[inputs]]\nname = "text"\ntype = "string"\n'
+    '[[steps]]\nid = "note"\nkind = "action"\noperation = "addLogNote"\narguments = { text = "{{input.text}}" }\n')
 open(os.path.join(recipes, "broken.toml"), "w").write('id = "broken"\ntitle = "x"\nversion = "0"\n[[steps]]\nid = "a"\nkind = "action"\noperation = "rmRf"\n')
 tokfile = os.path.join(tmp, "tokens")
 with open(tokfile, "w") as f:
     f.write("# name role token\n")
-    for role, t in TOK.items():
-        f.write(f"{role}-1 {role} {t}\n")
+    for who, t in TOK.items():
+        f.write(f"{who}-1 {ROLE.get(who, who)} {t}\n")
 
 procs = []
 try:
@@ -133,6 +138,8 @@ try:
     dome = {"project_id": pid, "kind": "full_dome", "mode": "STD_L0", "note": "station 1"}
     s, b = call("POST", "/scans", "viewer", dome)
     check("viewer can't scan (403 forbidden)", s == 403 and b["code"] == "forbidden", b)
+    s, b = call("POST", "/scans", "viewer", {"bogus": True})
+    check("viewer's malformed scan request is 403 forbidden, not a validation error", s == 403 and b["code"] == "forbidden", b)
     s, b = call("POST", "/scans", "agent", {**dome, "kind": "area"})
     check("area scan without a window is 400 invalid_request", s == 400 and b["code"] == "invalid_request", b)
     s, b = call("POST", "/scans", "operator", {**dome, "mode": "STD_L9"})
@@ -163,6 +170,9 @@ try:
     check("agent can't approve (403)", s == 403, b)
     s, b = call("POST", f"/jobs/{job['job_id']}/approve", "operator")
     check("operator approves", s == 200 and b["state"] == "queued", b)
+    s, b = call("POST", f"/jobs/{job['job_id']}/approve", "operator")
+    check("approving twice is a conflict naming the state in API spelling", s == 409 and b["code"] == "conflict"
+          and re.fullmatch(r"job is (queued|running|succeeded), not awaiting approval", b.get("detail", "")), b)
     seen_phases = set()
     t0 = time.time()
     while time.time() - t0 < 60:
@@ -176,7 +186,8 @@ try:
     s, log = call("GET", f"/log?project_id={pid}", "viewer")
     check("queued while the bridge's cancelled task lingered: waited instead of scanner_busy",
           any("clear the cancelled task" in e["text"] and e["refs"].get("job_id") == job["job_id"] for e in log), [e["text"] for e in log])
-    check("phases reported: leveling then sweeping", {"leveling", "sweeping"} <= seen_phases, seen_phases)
+    check("phases reported: waiting (for the cancelled task), leveling, sweeping",
+          {"waiting", "leveling", "sweeping"} <= seen_phases, seen_phases)
     station_scan = j["result"]["scan_id"]
     s, sc = call("GET", f"/scans/{station_scan}", "viewer")
     check("scan record: full dome, station 1, timings", s == 200 and sc["kind"] == "full_dome" and sc["station"] == 1
@@ -215,15 +226,28 @@ try:
               and all(c["ok"] for c in ex["checks"]) and any("preview" in c.get("detail", "") for c in ex["checks"]), ex)
         s, _, body = fetch(f"/exports/{ex.get('export_id')}/file", "viewer")
         check("PLY file is complete", s == 200 and body.startswith(b"ply") and len(body) == body.index(b"end_header\n") + 11 + 15 * 777580, (s, len(body)))
+        t_full = time.time()
         s, ej2 = call("POST", f"/scans/{station_scan}/exports", "agent", {"format": "las", "intensity": "none"})
+        _, st_ = call("GET", "/status", "viewer")
+        check("a running export is not the scanner's current job", st_["scanner"]["current_job_id"] is None, st_)
         ej2 = wait_job(ej2["job_id"], ("succeeded", "failed"), timeout=180)
+        t_full = time.time() - t_full
         s, ex2 = call("GET", f"/exports/{ej2['result']['export_id']}", "viewer") if ej2["state"] == "succeeded" else (0, ej2)
         s3, _, body = fetch(f"/exports/{ex2.get('export_id')}/file", "viewer")
         check("full-dome LAS export: 6,281,859 points, levelled", s == 200 and ex2["point_count"] == 6281859
               and next(c for c in ex2["checks"] if c["name"] == "levelled")["ok"] and len(body) == 227 + 20 * 6281859, (ex2, len(body)))
+        exports_dir = os.path.join(tmp, "data", "exports")
+        n_files = len(os.listdir(exports_dir))
+        t_cancel = time.time()
+        s, ej3 = call("POST", f"/scans/{station_scan}/exports", "agent", {"format": "las", "intensity": "none"})
+        s, b = call("POST", f"/jobs/{ej3['job_id']}/cancel", "agent")
+        ej3 = wait_job(ej3["job_id"], ("succeeded", "failed", "cancelled"), timeout=180)
+        t_cancel = time.time() - t_cancel
+        check("cancelling an export stops it before it finishes, leaving no file", ej3["state"] == "cancelled"
+              and "result" not in ej3 and len(os.listdir(exports_dir)) == n_files and t_cancel < t_full, (ej3, t_cancel, t_full))
     # --- recipes and runs ---
     s, rl = call("GET", "/recipes", "viewer")
-    check("recipes listed, the broken one skipped", s == 200 and [r["recipe_id"] for r in rl] == ["window-measurement"], rl)
+    check("recipes listed, the broken one skipped", s == 200 and sorted(r["recipe_id"] for r in rl) == ["log-note", "window-measurement"], rl)
     s, rc = call("GET", "/recipes/window-measurement", "viewer")
     check("recipe served as data", s == 200 and [st["step_id"] for st in rc["steps"]][:3] == ["overview", "box", "aim"], rc)
     s, b = call("POST", "/runs", "agent", {"recipe_id": "window-measurement", "project_id": pid, "inputs": {"purpose": "nonsense"}})
@@ -233,10 +257,30 @@ try:
     s, runc = call("POST", "/runs", "agent", {"recipe_id": "window-measurement", "project_id": pid, "inputs": {"purpose": "blinds"}})
     r = wait_run(runc["run_id"], lambda r: r["waiting_for"] == "approval")
     check("run waits for approval of its overview scan", r["state"] == "waiting_for_person" and r["current_step_id"] == "overview", r)
+    s, b = call("POST", f"/runs/{runc['run_id']}/advance", "agent2", {"step_id": "box", "input": {}})
+    check("another agent can't advance the run (403)", s == 403 and b["code"] == "forbidden", b)
+    s, b = call("POST", f"/runs/{runc['run_id']}/cancel", "agent2")
+    check("another agent can't cancel the run (403)", s == 403 and b["code"] == "forbidden", b)
+    _, r = call("GET", f"/runs/{runc['run_id']}", "viewer")
+    check("... and the run carries on", r["state"] == "waiting_for_person", r)
     s, b = call("POST", f"/runs/{runc['run_id']}/cancel", "agent")
     r = wait_run(runc["run_id"], lambda r: False, timeout=10)
     _, oj = call("GET", f"/jobs/{r['steps'][0]['job_id']}", "viewer")
     check("cancelling the run cancels its pending scan", r["state"] == "cancelled" and oj["state"] == "cancelled", (r["state"], oj["state"]))
+    s, runo = call("POST", "/runs", "agent", {"recipe_id": "window-measurement", "project_id": pid, "inputs": {"purpose": "trim"}})
+    wait_run(runo["run_id"], lambda r: r["waiting_for"] == "approval")
+    s, b = call("POST", f"/runs/{runo['run_id']}/cancel", "operator")
+    r = wait_run(runo["run_id"], lambda r: False, timeout=10)
+    check("an operator may cancel an agent's run", s == 200 and r["state"] == "cancelled", (s, r["state"]))
+    s, runn = call("POST", "/runs", "agent", {"recipe_id": "log-note", "project_id": pid, "inputs": {"text": "   "}})
+    r = wait_run(runn["run_id"], lambda r: False, timeout=10)
+    check("addLogNote with blank text fails the run with invalid_request", r["state"] == "failed"
+          and r["problem"]["code"] == "invalid_request" and "1–4000" in r["problem"]["detail"], r)
+    s, runn = call("POST", "/runs", "agent", {"recipe_id": "log-note", "project_id": pid, "inputs": {"text": "Door wedged open"}})
+    r = wait_run(runn["run_id"], lambda r: False, timeout=10)
+    _, log = call("GET", f"/log?project_id={pid}", "viewer")
+    check("addLogNote with text writes the note", r["state"] == "succeeded"
+          and any(e["text"] == "Door wedged open" and e["refs"].get("run_id") == runn["run_id"] for e in log), r)
 
     if FIX:
         s, run = call("POST", "/runs", "agent", {"recipe_id": "window-measurement", "project_id": pid, "inputs": {"purpose": "blinds"}})
@@ -276,6 +320,17 @@ try:
         if j4.get("phase") == "sweeping" or j4["state"] != "running" and j4["state"] != "queued":
             break
         time.sleep(0.05)
+    # While job4 runs, a granted agent scan waits in the queue; cancelling it gives the grant use back.
+    s, g2 = call("POST", "/grants", "operator", {"project_id": pid, "expires_at": "2099-01-01T00:00:00Z",
+                                                 "max_scans": 1, "allowed_modes": ["STD_L0"]})
+    s, jq = call("POST", "/scans", "agent", dome)
+    _, gl = call("GET", "/grants", "viewer")
+    used = next(x["scans_used"] for x in gl if x["grant_id"] == g2["grant_id"])
+    s, b = call("POST", f"/jobs/{jq['job_id']}/cancel", "agent")
+    _, gl = call("GET", "/grants", "viewer")
+    check("a granted scan cancelled before it starts gives its grant use back", jq["state"] == "queued" and used == 1
+          and b["state"] == "cancelled" and next(x["scans_used"] for x in gl if x["grant_id"] == g2["grant_id"]) == 0, (jq, used, gl))
+    call("DELETE", f"/grants/{g2['grant_id']}", "operator")
     s, b = call("POST", f"/jobs/{job4['job_id']}/cancel", "operator")
     j4 = wait_job(job4["job_id"], ("cancelled", "failed", "succeeded"))
     check("scan cancelled mid-sweep reads cancelled at once", j4["state"] == "cancelled" and "partial_scan_id" not in j4, j4)
@@ -297,6 +352,19 @@ try:
     tasks = json.loads(urllib.request.urlopen(f"http://{MOCK}/api/v1/tasks").read())
     check("scanner has no task left", tasks == [], tasks)
 
+    # Plant cached copies (unless real fixtures cached them already) to see what a delete does to them.
+    cache = os.path.join(tmp, "data", "scans")
+    os.makedirs(cache, exist_ok=True)
+    cached = [os.path.join(cache, f"{sc2['scan_id']}.{ext}") for ext in ("tzf", "jpg")]
+    for c in cached:
+        if not os.path.exists(c):
+            open(c, "wb").write(b"\xff\xd8 cached")
+    s, _, body = fetch(f"/scans/{sc2['scan_id']}/preview", "viewer")
+    check("a listed scan's cached preview is served", s == 200 and body == open(cached[1], "rb").read(), s)
+    ghost = os.path.join(cache, f"{uuid.uuid4()}.jpg")
+    open(ghost, "wb").write(b"\xff\xd8 ghost")
+    s, _, body = fetch(f"/scans/{os.path.basename(ghost)[:-4]}/preview", "viewer")
+    check("a cached file for a scan the scanner doesn't list is refused and evicted", s == 404 and not os.path.exists(ghost), s)
     s, b = call("DELETE", f"/scans/{sc2['scan_id']}", "agent")
     check("agent can't delete (403)", s == 403, b)
     s, b = call("DELETE", f"/scans/{sc2['scan_id']}", "operator")
@@ -304,6 +372,22 @@ try:
     s, _ = call("DELETE", f"/scans/{sc2['scan_id']}", "operator", headers={"X-Confirm": sc2["scan_id"]})
     s2, gone = call("GET", f"/scans/{sc2['scan_id']}", "viewer")
     check("confirmed delete removes the scan", s == 204 and s2 == 404, (s, s2))
+    s3, _, _ = fetch(f"/scans/{sc2['scan_id']}/preview", "viewer")
+    s4, _, _ = fetch(f"/scans/{sc2['scan_id']}/tzf", "viewer")
+    check("delete evicts the cached file and preview; neither is served", s3 == 404 and s4 == 404
+          and not any(os.path.exists(c) for c in cached), (s3, s4, [os.path.exists(c) for c in cached]))
+    if FIX:
+        s, _ = call("GET", f"/exports/{ex.get('export_id')}", "viewer")
+        s2, _, _ = fetch(f"/exports/{ex.get('export_id')}/file", "viewer")
+        check("delete also removes exports made from the scan", s == 404 and s2 == 404, (s, s2))
+    else:
+        s, b = call("GET", f"/scans/{station_scan}/tzf", "viewer")
+        check("a scanner error status (no file on the mock) is 502 scanner_error", s == 502 and b["code"] == "scanner_error"
+              and "404" in b["title"], b)
+        s, ej = call("POST", f"/scans/{station_scan}/exports", "agent", {"format": "ply"})
+        ej = wait_job(ej["job_id"], ("succeeded", "failed", "cancelled"))
+        check("... and fails an export with scanner_error", ej["state"] == "failed" and ej["problem"]["code"] == "scanner_error"
+              and ej["problem"]["status"] == 502, ej)
     s, sc1 = call("GET", f"/scans/{station_scan}", "viewer")
     check("other scans survive the renumbering", s == 200, sc1)
 
@@ -324,6 +408,23 @@ try:
     check("disconnected scanner shows as connected: false", s == 200 and b["scanner"]["connected"] is False, b)
     s, b = call("POST", "/scans", "operator", dome, base="127.0.0.1:8798")
     check("scan with no scanner is 503 scanner_disconnected", s == 503 and b["code"] == "scanner_disconnected", b)
+
+    # A bridge that can't write its cache: `scans` is a file, not a directory.
+    bad_data = os.path.join(tmp, "bad-data")
+    os.makedirs(bad_data)
+    open(os.path.join(bad_data, "scans"), "w").write("not a directory")
+    procs.append(subprocess.Popen([f"{BIN}/x9-bridge"], env={**os.environ, "X9_BASE": f"http://{MOCK}/api/v1",
+                                  "BRIDGE_ADDR": "127.0.0.1:8797", "BRIDGE_TOKENS": tokfile, "BRIDGE_DATA": bad_data},
+                                  stderr=subprocess.DEVNULL))
+    wait_up("127.0.0.1:8797", "/v1/health")
+    s, b = call("GET", f"/scans/{station_scan}/preview", "viewer", base="127.0.0.1:8797")
+    check("a cache the bridge can't write is 500 cache_error", s == 500 and b["code"] == "cache_error", b)
+
+    # The simulator serves the item routes the x9 CLI uses.
+    for args, key in ((["scan", "0"], "scanUUID"), (["tzf", "0"], "nbPoints")):
+        p = subprocess.run([f"{BIN}/x9", "--base", f"http://{MOCK}/api/v1", *args], capture_output=True, text=True)
+        out = json.loads(p.stdout) if p.returncode == 0 else {}
+        check(f"x9 {args[0]} works against the mock", p.returncode == 0 and out.get(key) is not None, (p.returncode, p.stderr))
 finally:
     for p in procs:
         p.terminate()

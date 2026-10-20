@@ -1,7 +1,7 @@
 //! Shared state: tokens, rules, jobs, grants, the field log and the event bus.
 //! Everything is in memory for now; it is rebuilt from the scanner on restart.
 
-use crate::model::{Caller, Grant, Job, LogEntry, Role, Rules, ScanRequest, Timings, Window};
+use crate::model::{Caller, Grant, Job, JobState, LogEntry, Role, Rules, ScanRequest, Timings, Window};
 use crate::problem::ApiError;
 use crate::rules::Snapshot;
 use crate::util::{new_id, now_rfc3339};
@@ -27,6 +27,8 @@ pub struct JobRecord {
     pub project_name: String,
     pub scanner_task_id: Option<i64>,
     pub cancel_requested: bool,
+    /// The grant this scan used, until the use is given back.
+    pub grant_id: Option<String>,
 }
 
 /// What the bridge remembers about scans it ran (the scanner keeps none of this).
@@ -48,6 +50,41 @@ pub struct Inner {
     pub runs: HashMap<String, crate::runs::RunRecord>,
     /// Scanner tasks the bridge cancelled that may still be listed in `/tasks`.
     pub cancelled_tasks: HashSet<i64>,
+}
+
+impl Inner {
+    /// Cancel a job that has not started (given back its grant use), or ask
+    /// whoever runs it (the scan worker, an export) to stop. Finished jobs are
+    /// left alone. Returns the job as it now stands.
+    pub fn cancel_job(&mut self, job_id: &str) -> Option<Job> {
+        let rec = self.jobs.iter_mut().find(|j| j.job.job_id == job_id)?;
+        match rec.job.state {
+            JobState::Queued | JobState::AwaitingApproval => {
+                rec.job.state = JobState::Cancelled;
+                rec.job.finished_at = Some(now_rfc3339());
+            }
+            JobState::Running => rec.cancel_requested = true,
+            _ => {}
+        }
+        let job = rec.job.clone();
+        if job.state == JobState::Cancelled {
+            self.refund_grant(job_id);
+        }
+        Some(job)
+    }
+
+    /// Give back the grant use of a scan that never reached the scanner.
+    pub fn refund_grant(&mut self, job_id: &str) {
+        let Some(gid) = self.jobs.iter_mut().find(|j| j.job.job_id == job_id).and_then(|j| j.grant_id.take()) else { return };
+        if let Some(g) = self.grants.iter_mut().find(|g| g.grant_id == gid) {
+            g.scans_used = g.scans_used.saturating_sub(1);
+        }
+    }
+
+    /// The scan job the worker is running (exports run beside it and don't count).
+    pub fn current_scan_job(&self) -> Option<&Job> {
+        self.jobs.iter().map(|j| &j.job).find(|j| j.state == JobState::Running && j.kind == "scan")
+    }
 }
 
 pub struct AppState {
@@ -141,5 +178,77 @@ impl AppState {
             ),
             Err(_) => (Snapshot::default(), None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::GrantRequest;
+
+    fn job(id: &str, kind: &str, state: JobState, grant: Option<&str>) -> JobRecord {
+        JobRecord {
+            job: Job {
+                job_id: id.into(),
+                kind: kind.into(),
+                state,
+                phase: None,
+                progress: None,
+                requested_by: "agent-1".into(),
+                run_id: None,
+                created_at: now_rfc3339(),
+                started_at: None,
+                finished_at: None,
+                result: None,
+                problem: None,
+                partial_scan_id: None,
+            },
+            request: None,
+            project_id: "p1".into(),
+            project_name: "p".into(),
+            scanner_task_id: None,
+            cancel_requested: false,
+            grant_id: grant.map(str::to_string),
+        }
+    }
+
+    fn grant(used: u32) -> Grant {
+        let req = GrantRequest {
+            project_id: "p1".into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            max_scans: Some(2),
+            allowed_modes: vec![],
+            allow_color: false,
+            run_id: None,
+        };
+        Grant { req, grant_id: "g1".into(), granted_by: "operator-1".into(), scans_used: used, expires_unix: u64::MAX }
+    }
+
+    #[test]
+    fn cancelling_before_the_start_gives_the_grant_use_back() {
+        let mut inner = Inner { grants: vec![grant(2)], ..Default::default() };
+        inner.jobs.push(job("j1", "scan", JobState::Queued, Some("g1")));
+        inner.jobs.push(job("j2", "scan", JobState::Running, Some("g1")));
+        assert_eq!(inner.cancel_job("j1").unwrap().state, JobState::Cancelled);
+        assert_eq!(inner.grants[0].scans_used, 1);
+        // Only once.
+        inner.cancel_job("j1");
+        assert_eq!(inner.grants[0].scans_used, 1);
+        // A running job is only asked to stop; the worker decides.
+        assert_eq!(inner.cancel_job("j2").unwrap().state, JobState::Running);
+        assert!(inner.jobs[1].cancel_requested);
+        assert_eq!(inner.grants[0].scans_used, 1);
+        inner.refund_grant("j2");
+        assert_eq!(inner.grants[0].scans_used, 0);
+        assert!(inner.cancel_job("nope").is_none());
+    }
+
+    #[test]
+    fn exports_are_not_the_current_job() {
+        let mut inner = Inner::default();
+        inner.jobs.push(job("e1", "export", JobState::Running, None));
+        assert!(inner.current_scan_job().is_none());
+        inner.jobs.push(job("s1", "scan", JobState::Running, None));
+        assert_eq!(inner.current_scan_job().unwrap().job_id, "s1");
     }
 }

@@ -56,9 +56,11 @@ empty body, not a problem document.
 | [`not_found`](#not_found) | 404 | No such … |
 | [`invalid_request`](#invalid_request) | 400 | Invalid request |
 | [`confirm_mismatch`](#confirm_mismatch) | 412 | Delete not confirmed |
-| [`conflict`](#conflict) | 409 (502 for a scanner refusal) | Conflict |
+| [`conflict`](#conflict) | 409 | Conflict |
 | [`scanner_disconnected`](#scanner_disconnected) | 503 | The scanner is not reachable |
 | [`scanner_busy`](#scanner_busy) | 409 | The scanner is busy |
+| [`scanner_error`](#scanner_error) | 502 | The scanner refused the request (…) |
+| [`cache_error`](#cache_error) | 500 | The bridge could not read or write its files |
 | [`battery_low`](#battery_low) | 409 | Battery too low to scan |
 | [`storage_low`](#storage_low) | 409 | Not enough space on the scanner |
 | [`instrument_moved`](#instrument_moved) | 409 | The scanner moved since its last scan |
@@ -95,11 +97,14 @@ action:
 | Your role can't write to the log | `POST /log` | agent, operator, admin |
 | Your role can't start runs | `POST /runs` | agent, operator, admin |
 | Your role can't advance runs | `POST /runs/{id}/advance` | agent, operator, admin |
+| Your role can't advance other people's runs | `POST /runs/{id}/advance` by an agent on a run it did not start | operator, admin |
 | Your role can't cancel runs | `POST /runs/{id}/cancel` | agent, operator, admin |
+| Your role can't cancel other people's runs | `POST /runs/{id}/cancel` by an agent on a run it did not start | operator, admin |
 
-For `POST /scans` the role is checked after the request is validated and the
-mode and project are looked up, so a viewer's malformed scan request gets
-`invalid_request` or `not_found` first. No hint.
+The role (and, for runs, the ownership) is checked before the request body
+is read, so a viewer's malformed request gets `forbidden`, not
+`invalid_request`. For runs, an unknown run id is `not_found` before the
+ownership check. No hint.
 
 ### `not_found`
 
@@ -107,12 +112,12 @@ mode and project are looked up, so a viewer's malformed scan request gets
 
 | Thing | When |
 | --- | --- |
-| scan | The scan id is not on the scanner, or is not a UUID-like id (hex digits and `-`, at most 64 characters) |
+| scan | The scan id is not on the scanner, or is not a UUID-like id (hex digits and `-`, at most 64 characters). For previews, files, aim and exports the scanner is asked every time, cached or not; a scan it no longer lists has its cached copies removed. |
 | scan file | The scan exists but the scanner lists no file for it (preview, `tzf`, aim, export) |
 | project | `POST /scans` or `POST /runs` with a `project_id` the scanner does not have |
 | job | Unknown job id (approve, cancel, get) |
 | grant | `DELETE /grants/{id}` for an unknown grant |
-| export | Unknown export id, or one from before a restart |
+| export | Unknown export id, one from before a restart, or one made from a scan that has since been deleted through the bridge |
 | recipe | Unknown or skipped recipe id |
 | run | Unknown run id |
 | step | `POST /runs/{id}/advance` with a `step_id` the run's recipe does not have |
@@ -134,7 +139,7 @@ No hint.
 | `POST /aim` | `box must lie within the WxH preview with y0 < y1`; `box has zero width` |
 | `POST /runs` | `input "purpose" is required`; `input "purpose" must be one of: …` |
 | `POST /runs/{id}/advance` | `missing: box` |
-| Run `problem` | A step's arguments do not fit the operation (`step "aim": …`), `exportPoints needs scan_id`, or a placeholder had no value (`{{steps.aim.window}} has no value yet`) |
+| Run `problem` | A step's arguments do not fit the operation (`step "aim": …`), `exportPoints needs scan_id`, an `addLogNote` step's text is missing, blank or too long (`step "note": text must be 1–4000 characters`), or a placeholder had no value (`{{steps.aim.window}} has no value yet`) |
 
 No hint. Fix the request and send it again.
 
@@ -148,8 +153,8 @@ Hint: "Repeat the scan id in the X-Confirm header."
 
 ### `conflict`
 
-**409**, or **502** when the scanner refused a request. The request clashes
-with the current state. Title "Conflict" unless noted; `detail` says why.
+**409.** The request clashes with the current state. Title "Conflict";
+`detail` says why.
 
 As a response:
 
@@ -157,10 +162,8 @@ As a response:
 | --- | --- |
 | `POST /projects` with a name the scanner already has | `a project named "kitchen" already exists` |
 | `POST /scans` when `max_queue_length` scan jobs are already queued or awaiting approval | `the queue is full (20 jobs)` |
-| `POST /jobs/{id}/approve` on a job not awaiting approval | `job is Queued, not awaiting approval` (the state is written in Rust's form, e.g. `Queued`, `Running`) |
+| `POST /jobs/{id}/approve` on a job not awaiting approval | `job is queued, not awaiting approval` (the job's `state` as the API spells it) |
 | `POST /runs/{id}/advance` on a step that is not waiting for input | `step "box" is not waiting for input` |
-| The bridge could not read or write its cache | `cache: …` or `cache directory: …` |
-| **502**: the scanner answered with an error status other than 409, for example 404 for a preview it does not have | Title `The scanner refused the request (<status>)`; `detail` holds the scanner's status, path and body |
 
 As a failed job's `problem`:
 
@@ -182,12 +185,14 @@ No hint.
 ### `scanner_disconnected`
 
 **503.** The bridge could not talk to the scanner: no connection, a timeout
-(5 s to connect), a response that is not the expected JSON, or a local I/O
-error while downloading a scan file.
+(5 s to connect), or a response that is not the expected JSON. (A scanner
+that answers with an error status is [`scanner_error`](#scanner_error); a
+disk error on the bridge's side is [`cache_error`](#cache_error).)
 
 - At admission: any request that needs the scanner (`/scan-modes`,
   `/projects`, `/scans`, previews, files, aim, exports, `POST /runs`).
-  `POST /scans` is refused at once.
+  `POST /scans` is refused at once. Cached previews and files are not served
+  either: the bridge cannot tell whether the scan still exists.
 - In a job: the worker checks the connection again before starting a scan.
   While a scan runs, the job fails after 10 failed polls in a row.
 
@@ -210,6 +215,35 @@ scanner link comes up.
 
 A task the bridge cancelled itself does not cause `scanner_busy` for the next
 60 s: the next scan waits for it to clear.
+
+### `scanner_error`
+
+**502.** The scanner answered a request with an error status other than 409
+(which is [`scanner_busy`](#scanner_busy)), for example 404 for a file or
+preview it does not have, or 500. Title `The scanner refused the request
+(<status>)`; `detail` holds the scanner's status, path and body.
+
+- As a response: any request the bridge passes on to the scanner (previews,
+  files, aim, delete, project creation, …).
+- As a job's `problem`: an export whose download the scanner refused, or a
+  scan the scanner refused to start.
+
+No hint.
+
+### `cache_error`
+
+**500.** The bridge could not read or write its own files under
+`BRIDGE_DATA`: the scan file cache, a download in progress, or an export
+file. Typical causes are a full disk or a directory the bridge may not write.
+
+| When | Where | `detail` |
+| --- | --- | --- |
+| Creating the cache directory, or moving a finished download into place | response, or export job `problem` | `cache directory: …`, `cache: …` |
+| Writing a scan file or preview as it downloads | response, or export job `problem` | `writing a download: …` |
+| Reading a cached file or an export file | response | `cache: …` |
+| Creating the exports directory or writing the export file | export job `problem` | `exports directory: …`, `writing the export: …` |
+
+Hint: "Check that BRIDGE_DATA is writable and its disk has space."
 
 ### `battery_low`
 
@@ -245,7 +279,7 @@ Hint: "Take a new overview scan at this station and aim from its preview."
 | When | Where | Title |
 | --- | --- | --- |
 | `POST /aim`: the reference scan's file or preview does not decode | response | Could not read the reference scan |
-| An export: the scan file does not decode, the output cannot be written, or `intensity: "preview"` was asked for and there is no preview | export job `problem` | Could not decode the scan |
+| An export: the scan file or preview does not decode, or `intensity: "preview"` was asked for and there is no preview | export job `problem` | Could not decode the scan |
 
 `detail` holds the decoder's message. No hint. The scan file itself is kept
 in the cache; download it with `GET /scans/{id}/tzf` to inspect it.

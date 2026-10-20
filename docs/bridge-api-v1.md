@@ -4,7 +4,7 @@
 > start with the [guide](guide.md); see also [recipes](recipes.md),
 > [errors](errors.md) and [tools](tools.md).
 
-Status: **draft 2** (2026-10-20); skeleton implemented in `crates/x9-bridge`. Spec: [`api/bridge-v1.openapi.yaml`](../api/bridge-v1.openapi.yaml).
+Status: **draft 3** (2026-10-20); skeleton implemented in `crates/x9-bridge`. Spec: [`api/bridge-v1.openapi.yaml`](../api/bridge-v1.openapi.yaml).
 
 The bridge service is the only thing that talks to the scanner. Every client
 (AI agents via the MCP server, the phone web UI, the `x9` CLI, scripts, agent
@@ -117,18 +117,21 @@ automatic checks: point count, levelled, coordinates, intensity source),
 `jobs` (list, get, cancel, approve), `grants`, `recipes` and `runs`, `log`,
 and the `events` stream. Scans run one at a time through a worker that re-checks the rules
 right before the scanner starts; exports run alongside. Scan files and
-previews are fetched once and cached under `BRIDGE_DATA`.
+previews are fetched once and cached under `BRIDGE_DATA`, served only while
+the scanner still lists the scan, and evicted when it is deleted.
 
 Not yet: `measurements` (Python worker) and the scan's own intensity image
 (component 4); exports take intensity from the preview.
 State is in memory and rebuilt from the scanner on restart.
 
-Testing: `cargo test -p x9-bridge` covers the rules, grants, aiming, recipe
-validation and placeholders, and time parsing. `crates/x9-bridge/tests/e2e.py
-target/release` runs 48 end-to-end checks against `x9-mock` (62 with
+Testing: `cargo test -p x9-bridge` covers the rules, grants (and giving a use
+back), aiming, recipe validation and placeholders, run ownership, error
+mapping, export cancelling, and time parsing. `crates/x9-bridge/tests/e2e.py
+target/release` runs 65 end-to-end checks against `x9-mock` (80 with
 `E2E_FIXTURES` pointing at real scans, for the file, aim, export and full
 recipe-run checks), which now simulates scans (phases, area scans, color,
-cancel with a lingering task and a partial scan, positional ids).
+cancel with a lingering task and a partial scan, positional ids, and the
+`GET /scans/{id}` and `GET /tzfs/{id}` item routes).
 
 Run it against the mock:
 

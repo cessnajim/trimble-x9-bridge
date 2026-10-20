@@ -74,7 +74,7 @@ async fn status(State(st): St, h: HeaderMap) -> ApiResult<Json<Value>> {
     let (_, raw) = st.snapshot().await;
     let (busy_job, queue_len) = {
         let inner = st.inner.lock().unwrap();
-        let running = inner.jobs.iter().find(|j| j.job.state == JobState::Running).map(|j| j.job.job_id.clone());
+        let running = inner.current_scan_job().map(|j| j.job_id.clone());
         let q = inner.jobs.iter().filter(|j| matches!(j.job.state, JobState::Queued | JobState::AwaitingApproval)).count();
         (running, q)
     };
@@ -158,12 +158,14 @@ async fn delete_scan(State(st): St, h: HeaderMap, Path(id): Path<String>) -> Api
         .and_then(|s| s.id)
         .ok_or_else(|| ApiError::not_found("scan"))?;
     st.scanner.delete_scan(numeric).await?;
+    crate::files::evict(&st, &id).await;
+    st.inner.lock().unwrap().scan_meta.remove(&id);
     st.log("note", format!("Scan {id} deleted"), &c.name, None, &[("scan_id", &id)]);
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn start_scan(State(st): St, h: HeaderMap, body: Bytes) -> ApiResult<Response> {
-    let c = st.caller(&h)?;
+    let c = st.require(&h, |r| r != Role::Viewer, "start scans")?;
     let req: ScanRequest = parse(&body)?;
     let job = submit_scan(&st, &c, req, None).await?;
     Ok((StatusCode::ACCEPTED, Json(job)).into_response())
@@ -192,9 +194,11 @@ pub async fn submit_scan(st: &Arc<AppState>, c: &crate::model::Caller, req: Scan
         let now = now_unix();
         let grant_idx = inner.grants.iter().position(|g| grant_covers(g, &req, now, run_id));
         let admission = admit_scan(&st.rules, &snap, c.role, queue_len, grant_idx.is_some())?;
+        let mut grant_id = None;
         if admission == Admission::Queue && c.role == Role::Agent {
             if let Some(i) = grant_idx {
                 inner.grants[i].scans_used += 1;
+                grant_id = Some(inner.grants[i].grant_id.clone());
             }
         }
         let job = Job {
@@ -219,6 +223,7 @@ pub async fn submit_scan(st: &Arc<AppState>, c: &crate::model::Caller, req: Scan
             project_name: project.project_name.clone().unwrap_or_default(),
             scanner_task_id: None,
             cancel_requested: false,
+            grant_id,
         });
         job
     };
@@ -250,20 +255,13 @@ async fn cancel_job(State(st): St, h: HeaderMap, Path(id): Path<String>) -> ApiR
     let c = st.require(&h, |r| r != Role::Viewer, "cancel jobs")?;
     let (job, project_id) = {
         let mut inner = st.inner.lock().unwrap();
-        let rec = inner.jobs.iter_mut().find(|j| j.job.job_id == id).ok_or_else(|| ApiError::not_found("job"))?;
+        let rec = inner.jobs.iter().find(|j| j.job.job_id == id).ok_or_else(|| ApiError::not_found("job"))?;
         if c.role == Role::Agent && rec.job.requested_by != c.name {
             return Err(ApiError::forbidden("cancel other people's jobs"));
         }
-        match rec.job.state {
-            JobState::Queued | JobState::AwaitingApproval => {
-                rec.job.state = JobState::Cancelled;
-                rec.job.finished_at = Some(now_rfc3339());
-            }
-            // The worker stops the scanner and marks it cancelled.
-            JobState::Running => rec.cancel_requested = true,
-            _ => {}
-        }
-        (rec.job.clone(), rec.project_id.clone())
+        let project_id = rec.project_id.clone();
+        // A running job is stopped by whoever runs it: the scan worker or the export.
+        (inner.cancel_job(&id).ok_or_else(|| ApiError::not_found("job"))?, project_id)
     };
     st.log("scan", format!("Cancel requested for {id}"), &c.name, Some(&project_id), &[("job_id", &id)]);
     st.emit_job(&job);
@@ -276,7 +274,7 @@ async fn approve_job(State(st): St, h: HeaderMap, Path(id): Path<String>) -> Api
         let mut inner = st.inner.lock().unwrap();
         let rec = inner.jobs.iter_mut().find(|j| j.job.job_id == id).ok_or_else(|| ApiError::not_found("job"))?;
         if rec.job.state != JobState::AwaitingApproval {
-            return Err(ApiError::conflict(format!("job is {:?}, not awaiting approval", rec.job.state)));
+            return Err(ApiError::conflict(format!("job is {}, not awaiting approval", rec.job.state.as_str())));
         }
         rec.job.state = JobState::Queued;
         (rec.job.clone(), rec.project_id.clone())
@@ -354,11 +352,17 @@ async fn add_log(State(st): St, h: HeaderMap, body: Bytes) -> ApiResult<Response
         project_id: Option<String>,
     }
     let req: Req = parse(&body)?;
-    if req.text.trim().is_empty() || req.text.len() > 4000 {
-        return Err(ApiError::invalid("text must be 1–4000 characters"));
-    }
+    check_note(&req.text)?;
     let e = st.log("note", req.text, &c.name, req.project_id.as_deref(), &[]);
     Ok((StatusCode::CREATED, Json(e)).into_response())
+}
+
+/// A log note's text (shared by `POST /log` and `addLogNote` steps).
+pub fn check_note(text: &str) -> ApiResult<()> {
+    if text.trim().is_empty() || text.len() > 4000 {
+        return Err(ApiError::invalid("text must be 1–4000 characters"));
+    }
+    Ok(())
 }
 
 async fn events(State(st): St, h: HeaderMap) -> ApiResult<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>> {
@@ -377,7 +381,7 @@ async fn events(State(st): St, h: HeaderMap) -> ApiResult<Sse<impl Stream<Item =
 }
 
 fn io_err(e: std::io::Error) -> ApiError {
-    ApiError::conflict(format!("cache: {e}"))
+    ApiError::cache(format!("cache: {e}"))
 }
 
 async fn scan_preview(State(st): St, h: HeaderMap, Path(id): Path<String>) -> ApiResult<Response> {
@@ -481,6 +485,7 @@ pub async fn submit_export(st: &Arc<AppState>, c: &crate::model::Caller, scan_id
         project_name: String::new(),
         scanner_task_id: None,
         cancel_requested: false,
+        grant_id: None,
     });
     st.log("export", format!("{} export of scan {scan_id} requested", req.format.ext()), &c.name, Some(&project_id), &[("job_id", &job.job_id), ("scan_id", &scan_id)]);
     st.emit_job(&job);
@@ -558,12 +563,14 @@ struct Advance {
 }
 
 async fn advance_run(State(st): St, h: HeaderMap, Path(id): Path<String>, body: Bytes) -> ApiResult<Json<crate::runs::Run>> {
-    st.require(&h, |r| r != Role::Viewer, "advance runs")?;
+    let c = st.require(&h, |r| r != Role::Viewer, "advance runs")?;
+    crate::runs::may_steer(&st, &id, &c, "advance other people's runs")?;
     let a: Advance = parse(&body)?;
     Ok(Json(crate::runs::advance(&st, &id, &a.step_id, a.input)?))
 }
 
 async fn cancel_run(State(st): St, h: HeaderMap, Path(id): Path<String>) -> ApiResult<Json<crate::runs::Run>> {
-    st.require(&h, |r| r != Role::Viewer, "cancel runs")?;
+    let c = st.require(&h, |r| r != Role::Viewer, "cancel runs")?;
+    crate::runs::may_steer(&st, &id, &c, "cancel other people's runs")?;
     Ok(Json(crate::runs::cancel(&st, &id)?))
 }

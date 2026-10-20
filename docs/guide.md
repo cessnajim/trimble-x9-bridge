@@ -57,7 +57,7 @@ a `.sha256` file. It contains:
 | `README.md`, `PROVENANCE.md`, `LICENSE` | |
 
 ```bash
-tag=v0.1.1; target=aarch64-unknown-linux-gnu
+tag=v0.1.2; target=aarch64-unknown-linux-gnu
 curl -LO https://github.com/cessnajim/trimble-x9-bridge/releases/download/$tag/trimble-x9-bridge-$tag-$target.tar.gz
 curl -LO https://github.com/cessnajim/trimble-x9-bridge/releases/download/$tag/trimble-x9-bridge-$tag-$target.tar.gz.sha256
 sha256sum -c trimble-x9-bridge-$tag-$target.tar.gz.sha256
@@ -83,7 +83,7 @@ The bridge refuses to start without a token file (see [Tokens](#tokens)).
 printf 'me operator %s\n' "$(openssl rand -hex 16)" > tokens
 chmod 600 tokens
 X9_BASE=http://192.168.42.1:34567/api/v1 BRIDGE_TOKENS=tokens ./x9-bridge
-# x9-bridge 0.1.1 listening on http://127.0.0.1:8795/v1 (scanner http://192.168.42.1:34567/api/v1)
+# x9-bridge 0.1.2 listening on http://127.0.0.1:8795/v1 (scanner http://192.168.42.1:34567/api/v1)
 ```
 
 To try it without a scanner, start `x9-mock` first and point `X9_BASE` at it
@@ -239,7 +239,8 @@ valid token; a missing or unknown token gets `401 unauthorized`.
 | Create or revoke a grant | no | no | yes | yes |
 | Start an export | no | yes | yes | yes |
 | Add a log note | no | yes | yes | yes |
-| Start, advance or cancel a recipe run | no | yes (any run) | yes (any run) | yes (any run) |
+| Start a recipe run | no | yes | yes | yes |
+| Advance or cancel a recipe run | no | only runs it started (same token name) | any run | any run |
 | Delete a scan | no | no | yes, with `X-Confirm` | yes, with `X-Confirm` |
 
 `admin` has exactly the rights of `operator` in this version. Changing rules
@@ -283,14 +284,14 @@ H="Authorization: Bearer $TOKEN"
 
 ```bash
 curl -s $B/health
-# {"ok":true,"version":"0.1.1"}
+# {"ok":true,"version":"0.1.2"}
 
 curl -s -H "$H" $B/status
 ```
 
 ```json
 {
-  "bridge": {"version": "0.1.1", "started_at": "2026-10-20T12:00:00Z",
+  "bridge": {"version": "0.1.2", "started_at": "2026-10-20T12:00:00Z",
              "queue_length": 0, "worker_ready": false},
   "scanner": {
     "connected": true,
@@ -311,7 +312,7 @@ curl -s -H "$H" $B/status
 | `bridge.worker_ready` | Whether the measurement worker is available. Always `false`: the worker is not built yet. |
 | `scanner.connected` | `false` when the scanner did not answer. The other scanner fields are then missing. |
 | `scanner.busy` | The scanner reports a current task (from any client) |
-| `scanner.current_job_id` | The bridge's job in state `running`, if any (a scan, or an export, which also runs) |
+| `scanner.current_job_id` | The bridge's scan job in state `running`, if any. Exports run beside the scanner and never show here. |
 | `scanner.leveling.state` | `ok`, `none`, `error`, or `in_progress` for any other value the scanner reports |
 | `scanner.leveling.tilt_rad` | The two compensator readings, radians (`0` when missing) |
 
@@ -372,7 +373,8 @@ How a scan request is admitted, in order:
 2. The mode must be one the scanner lists. This asks the scanner, so an
    unreachable scanner gives `503 scanner_disconnected` here.
 3. The project must exist on the scanner.
-4. Viewers are refused (`403 forbidden`).
+4. Viewers are refused (`403 forbidden`). The role is checked first, so a
+   viewer gets `forbidden` even for a malformed request.
 5. Connected, battery and storage rules (see [Rules](#rules)).
 6. The queue must have room (`max_queue_length`).
 7. An `agent` scan not covered by a grant is held as `awaiting_approval`.
@@ -387,7 +389,8 @@ scanner is idle:
 - If it lists only a task the bridge itself cancelled, the job waits for it
   to clear, up to 60 s, and logs "Waiting for the scanner to clear the
   cancelled task". After 60 s the job fails with `scanner_busy`. While it
-  waits, the job reads `running` with phase `leveling`.
+  waits, the job reads `running` with phase `waiting`, then `leveling` once
+  the scanner is clear.
 
 Then the bridge sends the scan and compares the scanner's echo of the request
 with what it sent. The scanner answers `202` even when it cannot parse a
@@ -412,7 +415,8 @@ curl -s -H "$H" $B/jobs/job_3f9a1c2b7d4e
 
 | `phase` | Meaning |
 | --- | --- |
-| `leveling` | Claimed, waiting for the scanner, or the scanner is levelling (its task is not yet `running`) |
+| `waiting` | Claimed, but the scanner still lists a task the bridge cancelled; the job waits for it to clear |
+| `leveling` | Claimed and about to start, or the scanner is levelling (its task is not yet `running`) |
 | `sweeping` | The laser sweep; also the few seconds after the file appears with color off |
 | `imaging` | Color images, after the scan file appeared (color on only) |
 | `downloading`, `decoding` | Export jobs |
@@ -482,7 +486,7 @@ curl -s -X POST -H "$H" $B/jobs/$JOB/approve
 
 - Only `operator` and `admin` can approve (`403 forbidden` otherwise).
 - Only a job in `awaiting_approval` can be approved (`409 conflict`
-  otherwise).
+  otherwise, for example "job is queued, not awaiting approval").
 - Approval writes an `approval` entry to the field log. The rules are checked
   again when the job starts, not at approval.
 - To refuse a job, cancel it.
@@ -519,8 +523,10 @@ or the request comes from that run. A grant does not limit the scan kind:
 full-dome and area scans are both covered.
 
 - The first covering grant, in creation order, is used. Its `scans_used`
-  goes up by one when the agent's scan is queued. The count is not given back
-  if the job later fails or is cancelled.
+  goes up by one when the agent's scan is queued. If the job is cancelled
+  before the scanner starts it (while `queued`, or while it waits for a
+  cancelled task to clear), the use is given back. It is not given back once
+  the scanner has the scan, or if the job fails.
 - Grants matter only for `agent` tokens. Operator scans never use one.
 - Grants never cover deletes.
 - `GET /grants` lists grants that have not expired, including used-up ones.
@@ -564,8 +570,11 @@ curl -s -X POST -H "$H" $B/jobs/$JOB/cancel
 - A job that has already finished is returned unchanged with `200`.
 - Every cancel request writes a "Cancel requested" `scan` entry to the field
   log.
-- Export jobs cannot be stopped: a cancel request on a running export is
-  accepted but the export runs to the end.
+- `running` export: the export stops at its next check: during the download,
+  between decoding and writing, or while writing (every 65,536 points). It
+  then reads `cancelled`, with no result and no export file. Decoding the
+  scan file itself cannot be interrupted, so on a big scan the stop can take
+  that long. Cancelling a run cancels its export the same way.
 
 What happens after the scanner is told to stop:
 
@@ -639,7 +648,8 @@ Other things to know:
   that the reference scan is the latest one. If the scanner does not answer,
   this check is skipped.
 - It downloads the reference scan's file and preview on first use (cached
-  afterwards), so the first call on a big scan takes a while.
+  afterwards), so the first call on a big scan takes a while. Like every
+  scan file request, it asks the scanner whether the scan still exists first.
 - A scan file the decoder cannot read gives `422 decode_failed`.
 
 ### Export points
@@ -671,6 +681,7 @@ curl -s -H "$H" -d '{"format":"ply","intensity":"auto"}' $B/scans/$SCAN/exports
   scanner. They need no approval, but `viewer` cannot start one.
 - The job's phases are `downloading` (fetching the scan file, unless cached)
   and `decoding`. On success `result` is `{"export_id": "exp_…"}`.
+- A running export can be cancelled; see [Cancel a job](#cancel-a-job).
 
 Read the export and its checks, then download the file:
 
@@ -714,7 +725,8 @@ curl -s -H "$H" -OJ $B/scans/$SCAN/tzf          # saves <scan_id>.tzf
 ```
 
 The file is the scanner's own `.tzf`, unchanged. The bridge downloads it once
-and serves it from its cache afterwards. Decode it yourself with
+and serves it from its cache afterwards, but only while the scanner still
+lists the scan: each request asks the scanner first. Decode it yourself with
 [trimble-tzf](https://github.com/cessnajim/trimble-tzf). A scan with no file
 is `404 not_found` ("No such scan file").
 
@@ -735,8 +747,10 @@ curl -s -X DELETE -H "$H" -H "X-Confirm: $SCAN" $B/scans/$SCAN
   deletes, because those ids shift.
 - An unknown scan is `404 not_found`.
 - The delete writes a `note` entry ("Scan … deleted") to the field log.
-- Deleting removes the scan from the scanner. The bridge's cached copy of its
-  file and preview is not removed (see [Data directory](#data-directory-and-state)).
+- Deleting removes the scan from the scanner, and the bridge removes its
+  cached file and preview and every export made from it since the bridge
+  started. After that, the scan, its preview, its file and those exports are
+  all `404 not_found` (see [Data directory](#data-directory-and-state)).
 - Grants never cover deletes, and recipes cannot delete.
 
 ### Field log
@@ -787,6 +801,9 @@ curl -s -H "$H" $B/runs/$RUN
 curl -s -H "$H" -d '{"step_id":"box","input":{"box":{"x0":523,"y0":418,"x1":674,"y1":564}}}' $B/runs/$RUN/advance
 curl -s -X POST -H "$H" $B/runs/$RUN/cancel
 ```
+
+Only the run's starter, an operator or an admin may advance or cancel it;
+another agent gets `403 forbidden`.
 
 ## Events
 
@@ -844,8 +861,18 @@ $BRIDGE_DATA/
 - Scan files and previews are fetched from the scanner once, then served from
   the cache. They are immutable on the scanner, so the cache does not go stale
   while the scan exists.
-- Nothing is ever removed by the bridge: not after a scan is deleted, not old
-  exports. Clean the directory by hand when needed.
+- Every request for a cached file first asks the scanner whether it still
+  lists the scan. If it doesn't (deleted through the bridge, the vendor app or
+  anything else), the cached file and preview are removed and the request is
+  `404 not_found`. If the scanner can't be reached, the request fails with
+  `503 scanner_disconnected` rather than serve a file that may be deleted.
+- `DELETE /scans/{id}` removes the scan's cached files and the exports made
+  from it since the bridge started. Exports from before a restart are not
+  tracked (see below) and are never removed; nor are old exports of scans that
+  still exist. Clean the directory by hand when needed.
+- A download that fails or is cancelled removes its `.part-dl_…` file.
+- When the bridge cannot read or write this directory (permissions, a full
+  disk), requests fail with `500 cache_error`.
 - Scan ids in paths must be hexadecimal with dashes (up to 64 characters);
   anything else is `404`, so a path cannot leave the cache directory.
 

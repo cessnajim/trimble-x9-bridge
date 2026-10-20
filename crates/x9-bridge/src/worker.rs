@@ -1,6 +1,7 @@
 //! Runs queued scan jobs one at a time. Re-checks the rules right before the
 //! scanner starts, then follows the scanner's task through its phases:
-//! leveling → sweeping → (scan file appears) → imaging if color → done.
+//! (waiting, while a task the bridge cancelled clears) → leveling → sweeping →
+//! (scan file appears) → imaging if color → done.
 
 use crate::map::parse_file;
 use crate::model::{JobState, ScanKind, Timings};
@@ -99,7 +100,11 @@ async fn run_scan(st: &AppState, job_id: &str) {
     }
     match wait_idle(st, job_id, &req.project_id).await {
         Idle::Ready => {}
-        Idle::Cancelled => return finish(st, job_id, JobState::Cancelled, None, None),
+        Idle::Cancelled => {
+            // The scanner never got this scan: give its grant use back.
+            st.inner.lock().unwrap().refund_grant(job_id);
+            return finish(st, job_id, JobState::Cancelled, None, None);
+        }
         Idle::Failed(e) => return finish(st, job_id, JobState::Failed, None, Some(&e)),
     }
     // Taken after the wait: a cancelled scan's partial sweep may be filed during it.
@@ -308,6 +313,9 @@ async fn wait_idle(st: &AppState, job_id: &str, project_id: &str) -> Idle {
         match busy(&tasks, &ours) {
             Busy::Idle => {
                 st.inner.lock().unwrap().cancelled_tasks.clear();
+                if logged {
+                    update(st, job_id, |r| r.job.phase = Some("leveling".into()));
+                }
                 return Idle::Ready;
             }
             Busy::Other(n) => return Idle::Failed(scanner_busy(format!("{n} task(s) running"))),
@@ -316,6 +324,7 @@ async fn wait_idle(st: &AppState, job_id: &str, project_id: &str) -> Idle {
             }
             Busy::Ours => {
                 if !logged {
+                    update(st, job_id, |r| r.job.phase = Some("waiting".into()));
                     st.log("scan", "Waiting for the scanner to clear the cancelled task", "bridge", Some(project_id), &[("job_id", job_id)]);
                     logged = true;
                 }
@@ -378,31 +387,62 @@ async fn follow_cancelled(st: &AppState, job_id: &str, task_id: Option<i64>, bef
     );
 }
 
+/// Resolves once someone asks the job to stop.
+async fn until_cancelled(st: &AppState, job_id: &str) {
+    while !cancel_requested(st, job_id) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Run `fut` unless the job is cancelled first (then `None`; `fut` is dropped).
+async fn unless_cancelled<T>(st: &AppState, job_id: &str, fut: impl std::future::Future<Output = T>) -> Option<T> {
+    tokio::select! {
+        v = fut => Some(v),
+        _ = until_cancelled(st, job_id) => None,
+    }
+}
+
 /// Decode a scan into a point file. Runs alongside scans (it never touches the
-/// scanner beyond downloading the file once).
+/// scanner beyond downloading the file once). A cancel stops it at the next
+/// check: during the download, between decoding and writing, or while writing.
 pub async fn run_export(st: Arc<AppState>, job_id: String, scan_id: String, req: crate::export::ExportRequest) {
     use crate::export::Intensity;
     use crate::files::{scan_file, FileKind};
-    let tzf = match scan_file(&st, &scan_id, FileKind::Tzf).await {
-        Ok(p) => p,
-        Err(e) => return finish(&st, &job_id, JobState::Failed, None, Some(&e)),
+    let cancelled = |st: &AppState| finish(st, &job_id, JobState::Cancelled, None, None);
+    let tzf = match unless_cancelled(&st, &job_id, scan_file(&st, &scan_id, FileKind::Tzf)).await {
+        None => return cancelled(&st),
+        Some(Ok(p)) => p,
+        Some(Err(e)) => return finish(&st, &job_id, JobState::Failed, None, Some(&e)),
     };
     let preview = if req.intensity == Intensity::None {
         None
     } else {
-        match scan_file(&st, &scan_id, FileKind::Preview).await {
-            Ok(p) => tokio::fs::read(p).await.ok(),
-            Err(_) => None,
+        match unless_cancelled(&st, &job_id, scan_file(&st, &scan_id, FileKind::Preview)).await {
+            None => return cancelled(&st),
+            Some(Ok(p)) => tokio::fs::read(p).await.ok(),
+            Some(Err(_)) => None,
         }
     };
-    update(&st, &job_id, |r| r.job.phase = Some("decoding".into()));
+    if update(&st, &job_id, |r| r.job.phase = Some("decoding".into())) {
+        return cancelled(&st);
+    }
     let export_id = crate::util::new_id("exp");
     let out = st.data_dir.join("exports").join(format!("{export_id}.{}", req.format.ext()));
     if let Some(dir) = out.parent() {
-        let _ = tokio::fs::create_dir_all(dir).await;
+        if let Err(e) = tokio::fs::create_dir_all(dir).await {
+            return finish(&st, &job_id, JobState::Failed, None, Some(&ApiError::cache(format!("exports directory: {e}"))));
+        }
     }
-    let (out2, req2) = (out.clone(), req.clone());
-    let res = tokio::task::spawn_blocking(move || crate::export::run(&tzf, preview.as_deref(), &req2, &out2)).await;
+    let (out2, req2, st2, job2) = (out.clone(), req.clone(), st.clone(), job_id.clone());
+    let res = tokio::task::spawn_blocking(move || {
+        let stop = || cancel_requested(&st2, &job2);
+        crate::export::run(&tzf, preview.as_deref(), &req2, &out2, &stop)
+    })
+    .await;
+    if cancel_requested(&st, &job_id) {
+        let _ = tokio::fs::remove_file(&out).await;
+        return cancelled(&st);
+    }
     match res {
         Ok(Ok(mut v)) => {
             v["export_id"] = serde_json::json!(export_id);
@@ -422,10 +462,17 @@ pub async fn run_export(st: Arc<AppState>, job_id: String, scan_id: String, req:
             }
             finish(&st, &job_id, JobState::Succeeded, Some(serde_json::json!({"export_id": export_id})), None);
         }
-        Ok(Err(e)) => {
+        Ok(Err(crate::export::Failure::Write(e))) => {
+            let _ = tokio::fs::remove_file(&out).await;
+            finish(&st, &job_id, JobState::Failed, None, Some(&ApiError::cache(format!("writing the export: {e}"))));
+        }
+        Ok(Err(crate::export::Failure::Decode(e))) => {
+            let _ = tokio::fs::remove_file(&out).await;
             let p = ApiError::new(axum::http::StatusCode::UNPROCESSABLE_ENTITY, "decode_failed", "Could not decode the scan").detail(e);
             finish(&st, &job_id, JobState::Failed, None, Some(&p));
         }
+        // Only returned when a cancel was asked for, which is handled above.
+        Ok(Err(crate::export::Failure::Cancelled)) => cancelled(&st),
         Err(e) => finish(&st, &job_id, JobState::Failed, None, Some(&ApiError::conflict(e.to_string()))),
     }
 }

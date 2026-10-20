@@ -61,6 +61,12 @@ impl ApiError {
             .detail(detail)
             .hint("Plug in and power the X9; the bridge brings the USB link up.")
     }
+    /// The bridge's own disk (`BRIDGE_DATA`) failed: the cache, a download, an export file.
+    pub fn cache(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "cache_error", "The bridge could not read or write its files")
+            .detail(detail)
+            .hint("Check that BRIDGE_DATA is writable and its disk has space.")
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -77,10 +83,37 @@ impl From<x9_client::X9Error> for ApiError {
                 Self::new(StatusCode::CONFLICT, "scanner_busy", "The scanner is busy").detail(e.to_string())
             }
             x9_client::X9Error::Api { status, .. } => {
-                Self::new(StatusCode::BAD_GATEWAY, "conflict", format!("The scanner refused the request ({status})"))
+                Self::new(StatusCode::BAD_GATEWAY, "scanner_error", format!("The scanner refused the request ({status})"))
                     .detail(e.to_string())
             }
+            // Only downloads touch the disk: writing the file the scanner sent.
+            x9_client::X9Error::Io(io) => Self::cache(format!("writing a download: {io}")),
             _ => Self::disconnected(e.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use x9_client::X9Error;
+
+    fn api(status: u16) -> X9Error {
+        X9Error::Api { status, path: "/api/v1/tzfs/3/preview".into(), body: String::new() }
+    }
+
+    #[test]
+    fn scanner_errors_map_to_their_own_codes() {
+        let busy = ApiError::from(api(409));
+        assert_eq!((busy.status, busy.code), (StatusCode::CONFLICT, "scanner_busy"));
+        for s in [400, 404, 500] {
+            let e = ApiError::from(api(s));
+            assert_eq!((e.status, e.code), (StatusCode::BAD_GATEWAY, "scanner_error"), "{s}");
+            assert!(e.title.contains(&s.to_string()));
+        }
+        let disk = ApiError::from(X9Error::Io(std::io::Error::new(std::io::ErrorKind::StorageFull, "no space left")));
+        assert_eq!((disk.status, disk.code), (StatusCode::INTERNAL_SERVER_ERROR, "cache_error"));
+        let garbled = ApiError::from(X9Error::Json(serde_json::from_str::<u8>("x").unwrap_err()));
+        assert_eq!(garbled.code, "scanner_disconnected");
     }
 }

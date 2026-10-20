@@ -122,6 +122,18 @@ impl JobState {
     pub fn is_final(self) -> bool {
         matches!(self, JobState::Succeeded | JobState::Failed | JobState::Cancelled)
     }
+
+    /// The API spelling, e.g. `awaiting_approval`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JobState::AwaitingApproval => "awaiting_approval",
+            JobState::Queued => "queued",
+            JobState::Running => "running",
+            JobState::Succeeded => "succeeded",
+            JobState::Failed => "failed",
+            JobState::Cancelled => "cancelled",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -193,4 +205,17 @@ pub struct Timings {
     pub geometry_ready_s: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub done_s: Option<f64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::JobState;
+
+    #[test]
+    fn job_state_spelling_matches_serde() {
+        use JobState::*;
+        for s in [AwaitingApproval, Queued, Running, Succeeded, Failed, Cancelled] {
+            assert_eq!(serde_json::to_value(s).unwrap(), s.as_str());
+        }
+    }
 }

@@ -39,6 +39,24 @@ impl Format {
     }
 }
 
+/// Why an export stopped.
+#[derive(Debug)]
+pub enum Failure {
+    /// The scan file or preview could not be read (`decode_failed`).
+    Decode(String),
+    /// The output file could not be written (`cache_error`).
+    Write(std::io::Error),
+    /// A cancel was asked for.
+    Cancelled,
+}
+
+/// Points written between checks for a cancel.
+const STOP_EVERY: usize = 1 << 16;
+
+fn stopped() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Interrupted, "export cancelled")
+}
+
 fn check(name: &str, ok: bool, value: Option<f64>, unit: Option<&str>, detail: String) -> Value {
     let mut v = json!({"name": name, "ok": ok, "detail": detail});
     if let Some(x) = value {
@@ -51,21 +69,29 @@ fn check(name: &str, ok: bool, value: Option<f64>, unit: Option<&str>, detail: S
 }
 
 /// Run one export (blocking: call from `spawn_blocking`). Returns the
-/// `Export` fields other than ids.
-pub fn run(tzf: &Path, preview: Option<&[u8]>, req: &ExportRequest, out: &Path) -> Result<Value, String> {
-    let t = trimble_tzf::Tzf::open(tzf).map_err(|e| format!("open: {e}"))?;
-    let meta = t.scan_meta().map_err(|e| format!("metadata: {e}"))?;
-    let pts = t.grid_points().map_err(|e| format!("decode: {e}"))?;
+/// `Export` fields other than ids. `stop` is polled between stages and while
+/// writing; once it says yes the export ends with `Failure::Cancelled`.
+pub fn run(tzf: &Path, preview: Option<&[u8]>, req: &ExportRequest, out: &Path, stop: &dyn Fn() -> bool) -> Result<Value, Failure> {
+    let bad = Failure::Decode;
+    let t = trimble_tzf::Tzf::open(tzf).map_err(|e| bad(format!("open: {e}")))?;
+    let meta = t.scan_meta().map_err(|e| bad(format!("metadata: {e}")))?;
+    if stop() {
+        return Err(Failure::Cancelled);
+    }
+    let pts = t.grid_points().map_err(|e| bad(format!("decode: {e}")))?;
+    if stop() {
+        return Err(Failure::Cancelled);
+    }
 
     // Intensity. The scan's own intensity image (component 4) is not decoded
     // yet, so `auto` and `scan` use the grid-aligned preview when there is one.
     let (src, gray) = match (req.intensity, preview) {
         (Intensity::None, _) => ("none", None),
         (_, Some(jpg)) => {
-            let (w, h, px) = crate::aim::jpeg_luma(jpg)?;
+            let (w, h, px) = crate::aim::jpeg_luma(jpg).map_err(bad)?;
             ("preview", Some((w, h, px)))
         }
-        (Intensity::Preview, None) => return Err("no preview available for intensity".into()),
+        (Intensity::Preview, None) => return Err(bad("no preview available for intensity".into())),
         (_, None) => ("none", None),
     };
     let (rows, cols) = (meta.grid_rows as usize, meta.grid_cols as usize);
@@ -81,10 +107,10 @@ pub fn run(tzf: &Path, preview: Option<&[u8]>, req: &ExportRequest, out: &Path) 
     };
 
     match req.format {
-        Format::Ply => write_ply(out, &pts, &g),
-        Format::Las => write_las(out, &pts, &g),
+        Format::Ply => write_ply(out, &pts, &g, stop),
+        Format::Las => write_las(out, &pts, &g, stop),
     }
-    .map_err(|e| format!("write: {e}"))?;
+    .map_err(|e| if e.kind() == std::io::ErrorKind::Interrupted && stop() { Failure::Cancelled } else { Failure::Write(e) })?;
 
     // Checks.
     let mut lo = [f64::MAX; 3];
@@ -126,7 +152,7 @@ pub fn run(tzf: &Path, preview: Option<&[u8]>, req: &ExportRequest, out: &Path) 
     }))
 }
 
-fn write_ply(path: &Path, pts: &[trimble_tzf::GridPoint], gray: &dyn Fn(&trimble_tzf::GridPoint) -> u8) -> std::io::Result<()> {
+fn write_ply(path: &Path, pts: &[trimble_tzf::GridPoint], gray: &dyn Fn(&trimble_tzf::GridPoint) -> u8, stop: &dyn Fn() -> bool) -> std::io::Result<()> {
     let mut w = BufWriter::new(std::fs::File::create(path)?);
     write!(
         w,
@@ -135,7 +161,10 @@ fn write_ply(path: &Path, pts: &[trimble_tzf::GridPoint], gray: &dyn Fn(&trimble
          property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n",
         pts.len()
     )?;
-    for p in pts {
+    for (i, p) in pts.iter().enumerate() {
+        if i % STOP_EVERY == 0 && stop() {
+            return Err(stopped());
+        }
         let v = gray(p);
         for f in [p.point.x, p.point.y, p.point.z] {
             w.write_all(&f.to_le_bytes())?;
@@ -146,7 +175,7 @@ fn write_ply(path: &Path, pts: &[trimble_tzf::GridPoint], gray: &dyn Fn(&trimble
 }
 
 /// LAS 1.2, point data format 0 (20-byte records), 0.1 mm scale.
-fn write_las(path: &Path, pts: &[trimble_tzf::GridPoint], gray: &dyn Fn(&trimble_tzf::GridPoint) -> u8) -> std::io::Result<()> {
+fn write_las(path: &Path, pts: &[trimble_tzf::GridPoint], gray: &dyn Fn(&trimble_tzf::GridPoint) -> u8, stop: &dyn Fn() -> bool) -> std::io::Result<()> {
     const SCALE: f64 = 0.0001;
     let mut min = [f64::MAX; 3];
     let mut max = [f64::MIN; 3];
@@ -193,7 +222,10 @@ fn write_las(path: &Path, pts: &[trimble_tzf::GridPoint], gray: &dyn Fn(&trimble
     }
     let mut w = BufWriter::new(std::fs::File::create(path)?);
     w.write_all(&h)?;
-    for p in pts {
+    for (i, p) in pts.iter().enumerate() {
+        if i % STOP_EVERY == 0 && stop() {
+            return Err(stopped());
+        }
         for (k, v) in [p.point.x, p.point.y, p.point.z].into_iter().enumerate() {
             w.write_all(&((((v as f64) - min[k]) / SCALE).round() as i32).to_le_bytes())?;
         }
@@ -202,4 +234,47 @@ fn write_las(path: &Path, pts: &[trimble_tzf::GridPoint], gray: &dyn Fn(&trimble
         w.write_all(&0u16.to_le_bytes())?;
     }
     w.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use trimble_tzf::{GridPoint, Point};
+
+    fn pts(n: usize) -> Vec<GridPoint> {
+        (0..n).map(|i| GridPoint { point: Point { x: i as f32, y: 1.0, z: 2.0, intensity: 0.0 }, row: 0, col: i as u32 }).collect()
+    }
+
+    #[test]
+    fn writers_stop_when_asked() {
+        let dir = std::env::temp_dir().join(crate::util::new_id("x9-export"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = pts(3 * STOP_EVERY);
+        let grey = |_: &GridPoint| 128u8;
+        for (name, w) in [("a.ply", write_ply as fn(&Path, &[GridPoint], &dyn Fn(&GridPoint) -> u8, &dyn Fn() -> bool) -> std::io::Result<()>), ("a.las", write_las)] {
+            let out = dir.join(name);
+            // Asked to stop after the first batch.
+            let polls = Cell::new(0);
+            let stop = || {
+                polls.set(polls.get() + 1);
+                polls.get() > 1
+            };
+            let e = w(&out, &p, &grey, &stop).unwrap_err();
+            assert_eq!(e.kind(), std::io::ErrorKind::Interrupted, "{name}");
+            assert_eq!(polls.get(), 2, "{name}");
+            // Never asked: every point is written.
+            w(&out, &p, &grey, &|| false).unwrap();
+            let len = std::fs::metadata(&out).unwrap().len() as usize;
+            assert!(len > p.len() * 15, "{name}: {len}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_missing_file_is_a_decode_failure() {
+        let req = ExportRequest { format: Format::Ply, intensity: Intensity::None };
+        let out = std::env::temp_dir().join(crate::util::new_id("x9-none")).join("x.ply");
+        assert!(matches!(run(Path::new("/nonexistent.tzf"), None, &req, &out, &|| true), Err(Failure::Decode(_))));
+    }
 }

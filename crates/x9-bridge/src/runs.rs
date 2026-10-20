@@ -5,7 +5,7 @@ use crate::export::ExportRequest;
 use crate::model::{Caller, JobState, ScanRequest};
 use crate::problem::ApiError;
 use crate::recipe::{lookup, resolve, Recipe, RecipeStep};
-use crate::routes::{compute_aim, submit_export, submit_scan, AimReq};
+use crate::routes::{check_note, compute_aim, submit_export, submit_scan, AimReq};
 use crate::state::AppState;
 use crate::util::{new_id, now_rfc3339};
 use axum::http::StatusCode;
@@ -107,6 +107,21 @@ pub fn start(st: &Arc<AppState>, caller: Caller, recipe: Recipe, project_id: Str
     Ok(run)
 }
 
+/// Only whoever started a run, or an operator or admin, may advance or cancel it.
+pub fn may_steer(st: &AppState, run_id: &str, c: &Caller, what: &str) -> Result<(), ApiError> {
+    let inner = st.inner.lock().unwrap();
+    let rec = inner.runs.get(run_id).ok_or_else(|| ApiError::not_found("run"))?;
+    if may_steer_run(&rec.run, c) {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden(what))
+    }
+}
+
+fn may_steer_run(run: &Run, c: &Caller) -> bool {
+    run.started_by == c.name || c.role.is_operator()
+}
+
 /// Supply a person step's input. Errors if the run isn't waiting there.
 pub fn advance(st: &AppState, run_id: &str, step_id: &str, input: Value) -> Result<Run, ApiError> {
     let res = with_run(st, run_id, |rec| -> Result<Run, ApiError> {
@@ -125,7 +140,8 @@ pub fn advance(st: &AppState, run_id: &str, step_id: &str, input: Value) -> Resu
     res.ok_or_else(|| ApiError::not_found("run"))?
 }
 
-/// Ask a run to stop; the driver finishes the job in flight.
+/// Ask a run to stop. Its job in flight is cancelled too: a scan or an export
+/// stops at its next check, and the run settles once the job does.
 pub fn cancel(st: &AppState, run_id: &str) -> Result<Run, ApiError> {
     let job_id = with_run(st, run_id, |rec| {
         if !matches!(rec.run.state.as_str(), "succeeded" | "failed" | "cancelled") {
@@ -136,20 +152,7 @@ pub fn cancel(st: &AppState, run_id: &str) -> Result<Run, ApiError> {
     })
     .ok_or_else(|| ApiError::not_found("run"))?;
     if let Some(job_id) = job_id {
-        let job = {
-            let mut inner = st.inner.lock().unwrap();
-            inner.jobs.iter_mut().find(|j| j.job.job_id == job_id).map(|rec| {
-                match rec.job.state {
-                    JobState::Queued | JobState::AwaitingApproval => {
-                        rec.job.state = JobState::Cancelled;
-                        rec.job.finished_at = Some(now_rfc3339());
-                    }
-                    JobState::Running => rec.cancel_requested = true,
-                    _ => {}
-                }
-                rec.job.clone()
-            })
-        };
+        let job = st.inner.lock().unwrap().cancel_job(&job_id);
         if let Some(j) = job {
             st.emit_job(&j);
         }
@@ -240,6 +243,7 @@ async fn action(st: &Arc<AppState>, run_id: &str, i: usize, step: &RecipeStep, c
         }
         "addLogNote" => {
             let text = args.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+            check_note(&text).map_err(|e| ApiError::invalid(format!("step {:?}: {}", step.step_id, e.detail.unwrap_or_default())))?;
             let project = ctx["project_id"].as_str().unwrap_or("").to_string();
             let e = st.log("note", text, &caller.name, Some(&project), &[("run_id", run_id)]);
             Ok(json!({"entry_id": e.entry_id}))
@@ -325,5 +329,38 @@ fn check(step: &RecipeStep, ctx: &Value) -> Result<Value, ApiError> {
         Ok(json!({"ok": true, "checked": step.expect}))
     } else {
         Err(ApiError::new(StatusCode::CONFLICT, "check_failed", "A recipe check failed").detail(failed.join("; ")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Role;
+
+    fn run(started_by: &str) -> Run {
+        Run {
+            run_id: "run_1".into(),
+            recipe_id: "r".into(),
+            recipe_version: "1".into(),
+            project_id: "p".into(),
+            state: "waiting_for_person".into(),
+            waiting_for: Some("input".into()),
+            current_step_id: None,
+            started_by: started_by.into(),
+            created_at: now_rfc3339(),
+            finished_at: None,
+            steps: vec![],
+            problem: None,
+        }
+    }
+
+    #[test]
+    fn only_the_starter_or_an_operator_steers_a_run() {
+        let who = |name: &str, role| Caller { name: name.into(), role };
+        let r = run("agent-1");
+        assert!(may_steer_run(&r, &who("agent-1", Role::Agent)));
+        assert!(!may_steer_run(&r, &who("agent-2", Role::Agent)));
+        assert!(may_steer_run(&r, &who("op", Role::Operator)));
+        assert!(may_steer_run(&r, &who("root", Role::Admin)));
     }
 }
