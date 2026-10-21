@@ -367,11 +367,45 @@ async fn action(st: &Arc<AppState>, run_id: &str, i: usize, step: &RecipeStep, c
             st.inner.lock().unwrap().exports.get(&export_id).cloned().ok_or_else(|| ApiError::not_found("export"))
         }
         "measureOpening" => {
-            let scan_id = args.get("scan_id").and_then(Value::as_str).ok_or_else(|| ApiError::invalid("measureOpening needs scan_id"))?.to_string();
-            let job = submit_measure(st, caller, scan_id, MeasureRequest { kind: "opening".into() }, Some(run_id)).await?;
-            let job = wait_job(st, run_id, i, &job.job_id).await?;
-            let id = job.result.as_ref().and_then(|r| r.get("measurement_id")).and_then(Value::as_str).unwrap_or("").to_string();
-            st.inner.lock().unwrap().measurements.get(&id).cloned().ok_or_else(|| ApiError::not_found("measurement"))
+            let mut scan_id = args.get("scan_id").and_then(Value::as_str).ok_or_else(|| ApiError::invalid("measureOpening needs scan_id"))?.to_string();
+            // Site check: with `window` (the close-up's) and `rescans` > 0, a
+            // close-up short of wall on a side is rescanned wider, under the
+            // run, instead of asking a person.
+            let rescans = args.get("rescans").and_then(Value::as_u64).unwrap_or(0);
+            let mut window: Option<crate::model::Window> = match args.get("window") {
+                Some(w) if !w.is_null() => Some(serde_json::from_value(w.clone()).map_err(bad)?),
+                _ => None,
+            };
+            let mode = args.get("mode").and_then(Value::as_str).unwrap_or("STD_L2").to_string();
+            let project_id = ctx["project_id"].as_str().unwrap_or("").to_string();
+            let mut attempts = Vec::new();
+            loop {
+                let job = submit_measure(st, caller, scan_id.clone(), MeasureRequest { kind: "opening".into() }, Some(run_id)).await?;
+                let job = wait_job(st, run_id, i, &job.job_id).await?;
+                let id = job.result.as_ref().and_then(|r| r.get("measurement_id")).and_then(Value::as_str).unwrap_or("").to_string();
+                let mut m = st.inner.lock().unwrap().measurements.get(&id).cloned().ok_or_else(|| ApiError::not_found("measurement"))?;
+                let short: Vec<String> = m["details"]["sides"]
+                    .as_object()
+                    .map(|o| o.iter().filter(|(_, v)| v["ok"] == false).map(|(k, _)| k.clone()).collect())
+                    .unwrap_or_default();
+                attempts.push(json!({"scan_id": scan_id, "measurement_id": id, "short_sides": short,
+                                     "opening_width_mm": m["opening_width_mm"], "opening_height_mm": m["opening_height_mm"]}));
+                let done = short.is_empty() || attempts.len() as u64 > rescans;
+                let Some(w) = window.filter(|_| !done) else {
+                    m["site_check"] = json!({"rescans": attempts.len() - 1, "attempts": attempts, "ok": short.is_empty()});
+                    return Ok(m);
+                };
+                let d = m["details"]["distance_m"].as_f64().unwrap_or(1.0);
+                let (nw, a) = widen(w, &short, d);
+                st.log("check", format!("Site check: not enough wall at the {} of the opening; rescanning {:.1}° wider on each side of that axis", short.join(", "), a.to_degrees()),
+                       "bridge", Some(&project_id), &[("run_id", run_id), ("measurement_id", &id)]);
+                let req = ScanRequest { project_id: project_id.clone(), kind: crate::model::ScanKind::Area, mode: mode.clone(), color: false,
+                                        window: Some(nw), note: Some("site check rescan, wider".into()) };
+                let job = submit_scan(st, caller, req, Some(run_id)).await?;
+                let job = wait_job(st, run_id, i, &job.job_id).await?;
+                scan_id = job.result.as_ref().and_then(|r| r.get("scan_id")).and_then(Value::as_str).unwrap_or("").to_string();
+                window = Some(nw);
+            }
         }
         "aimFromPreview" => {
             let req: AimReq = serde_json::from_value(args).map_err(bad)?;
@@ -386,6 +420,25 @@ async fn action(st: &Arc<AppState>, run_id: &str, i: usize, step: &RecipeStep, c
         }
         op => Err(ApiError::invalid(format!("unknown operation {op:?}"))),
     }
+}
+
+/// A close-up window widened on its short axis (left/right: horizontal,
+/// top/bottom: vertical) by the angle that adds ~15 cm at the wall's distance
+/// `d`, on both sides. Returns the window and that angle.
+pub fn widen(w: crate::model::Window, short: &[String], d: f64) -> (crate::model::Window, f64) {
+    use std::f64::consts::{PI, TAU};
+    let a = (0.15 / d.max(0.3)).atan();
+    let mut nw = w;
+    if short.iter().any(|s| s == "left" || s == "right") {
+        nw.start_ha = (w.start_ha - a).rem_euclid(TAU);
+        nw.delta_ha = (w.delta_ha + 2.0 * a).min(TAU);
+    }
+    if short.iter().any(|s| s == "top" || s == "bottom") {
+        let (lo, hi) = ((w.start_va - a).max(0.0), (w.start_va + w.delta_va + a).min(PI));
+        nw.start_va = lo;
+        nw.delta_va = hi - lo;
+    }
+    (nw, a)
 }
 
 /// Follow a job to the end, mirroring "waiting for approval" onto the run.
@@ -531,5 +584,20 @@ mod tests {
         iv.confirmed = 0;
         iv.corrected = 1;
         assert_eq!(iv.summary(), "1 person intervention (1 correction)");
+    }
+
+    #[test]
+    fn widen_adds_about_15_cm_on_the_short_axis_only() {
+        use crate::model::Window;
+        let w = Window { start_ha: 0.05, delta_ha: 1.4, start_va: 0.7, delta_va: 1.35 };
+        let (nw, a) = widen(w, &["left".into()], 0.85);
+        assert!((a - (0.15f64 / 0.85).atan()).abs() < 1e-12);
+        assert!((nw.delta_ha - (1.4 + 2.0 * a)).abs() < 1e-12);
+        assert!((nw.start_ha - (0.05 - a).rem_euclid(std::f64::consts::TAU)).abs() < 1e-12, "wraps past zero");
+        assert_eq!((nw.start_va, nw.delta_va), (0.7, 1.35));
+        let (nw, _) = widen(w, &["top".into()], 0.85);
+        assert_eq!((nw.start_ha, nw.delta_ha), (0.05, 1.4));
+        assert!(nw.start_va < 0.7 && nw.start_va + nw.delta_va <= std::f64::consts::PI + 1e-12);
+        nw.validate().unwrap();
     }
 }

@@ -743,8 +743,8 @@ counted as obstructed.
 | `opening_width_mm`, `opening_height_mm` | The result |
 | `uncertainty_mm` | One grid cell (5 mm), or the spread of the unobstructed rows or columns if larger |
 | `values` | The same in metres, with uncertainty and basis |
-| `checks` | `wall_fit` (wall face RMS ≤ 3 mm), `opening_bounded` (wall on both sides in ≥ 60 % of rows and columns), `consistent` (≥ 30 % of them agree with the median to 20 mm) |
-| `details` | Distance, wall fit, points, rows and columns used and clean, spreads |
+| `checks` | `wall_fit` (wall face RMS ≤ 3 mm), `opening_bounded` (wall on both sides in ≥ 60 % of rows and columns), `margins` (≥ 50 mm of wall beyond the opening on every side, seen in ≥ 80 % of lines), `unoccluded` (≤ 25 % of a 10 cm wall ring around the opening empty), `consistent` (≥ 30 % of rows and columns agree with the median to 20 mm) |
+| `details` | Distance, wall fit, points, rows and columns used and clean, spreads, `sides` (left, right, bottom, top as seen from the scanner: margin, share of lines, ok), `ring_empty_pct` |
 | `evidence_url` | The check image: wall grey, opening green, measuring row and column red |
 
 On a real X9 (2026-10-21) it took about 4 s on a Raspberry Pi 4 for a 7.2 M

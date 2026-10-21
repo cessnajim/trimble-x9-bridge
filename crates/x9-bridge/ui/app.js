@@ -245,10 +245,11 @@ function measurementCard(m) {
   const img = ev === "loading" ? `<div class="placeholder small">Loading the evidence image…</div>` : ev?.error ? `<div class="problem">${esc(ev.error)}</div>` : `<img class="evidence" src="${esc(ev)}" alt="Wall face (grey), opening (green), measuring row and column (red)">`;
   return `<div class="measure"><div class="big">${esc(m.opening_width_mm)} × ${esc(m.opening_height_mm)} mm</div>
     <div class="meta">width × height, ± ${esc(m.uncertainty_mm)} mm · ${esc(m.details?.distance_m)} m from the scanner</div>
+    ${m.site_check?.rescans ? `<div class="note">The bridge rescanned ${m.site_check.rescans === 1 ? "once" : `${m.site_check.rescans} times`} on its own: ${esc(m.site_check.attempts.filter((a) => a.short_sides.length).map((a) => `${a.opening_width_mm} × ${a.opening_height_mm} mm with too little wall at the ${a.short_sides.join(", ")}`).join("; "))}.</div>` : ""}
     ${img}<p class="hint">Grey: the wall face. Green: the opening. Red: where it was measured. The green should fill the window up to the wall.</p>
     <ul class="steps">${(m.checks || []).map((c) => `<li><span class="dot ${c.ok ? "done" : "failed"}">${c.ok ? "✓" : "×"}</span><div class="grow"><strong>${esc(MCHECKS[c.name] ?? c.name)}</strong><div class="meta">${esc(c.detail ?? "")}</div></div></li>`).join("")}</ul></div>`;
 }
-const MCHECKS = { wall_fit: "Wall face fit", opening_bounded: "Wall on every side", consistent: "Rows agree" };
+const MCHECKS = { wall_fit: "Wall face fit", opening_bounded: "Wall found around the opening", margins: "Enough wall on every side", unoccluded: "Nothing in front of the wall", consistent: "Rows agree" };
 const FIELD = (n) => ({ opening_width_mm: "Opening width (mm)", opening_height_mm: "Opening height (mm)" })[n] ?? n;
 
 async function loadExport(id) {
@@ -518,7 +519,9 @@ function stepOutput(rs, def) {
   if (!o) return "";
   if (o.measurement_id) {
     if (!S.measurements[o.measurement_id]) S.measurements[o.measurement_id] = o;
-    return `${esc(o.opening_width_mm)} × ${esc(o.opening_height_mm)} mm (± ${esc(o.uncertainty_mm)} mm)`;
+    const sc = o.site_check;
+    const re = sc && sc.rescans > 0 ? ` · rescanned ${sc.rescans === 1 ? "once" : `${sc.rescans} times`} (${esc(sc.attempts.filter((a) => a.short_sides.length).map((a) => `${a.short_sides.join(", ")} short`).join("; "))})` : "";
+    return `${esc(o.opening_width_mm)} × ${esc(o.opening_height_mm)} mm (± ${esc(o.uncertainty_mm)} mm)${re}`;
   }
   if (o.export_id) {
     const ex = S.exports[o.export_id];

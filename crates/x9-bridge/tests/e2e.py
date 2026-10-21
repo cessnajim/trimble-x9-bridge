@@ -332,6 +332,9 @@ try:
         check("the run measures the opening: about 1185 x 1150 mm, with checks and evidence",
               steps["measure"]["state"] == "done" and abs(m["opening_width_mm"] - 1185) <= 10 and abs(m["opening_height_mm"] - 1150) <= 10
               and steps["measure_checks"]["state"] == "done" and m["evidence_url"].endswith("/evidence"), m)
+        sc = m.get("site_check", {})
+        check("site check: wall on every side of the close-up, so no rescan", sc.get("ok") is True and sc.get("rescans") == 0
+              and next(c for c in m["checks"] if c["name"] == "margins")["ok"], sc)
         s, _, png = fetch(m["evidence_url"].removeprefix("/v1"), "viewer")
         check("the evidence image is a PNG", s == 200 and png[:4] == b"\x89PNG", s)
         prop = {x["step_id"]: x for x in r["steps"]}["confirm"].get("proposal", {})

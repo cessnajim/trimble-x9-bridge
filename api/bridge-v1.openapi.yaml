@@ -1201,7 +1201,7 @@ components:
               basis: { type: string, description: How it was measured, in one line. }
         checks:
           type: array
-          description: "`wall_fit` (wall face RMS ≤ 3 mm), `opening_bounded` (wall on both sides in ≥ 60 % of rows and columns), `consistent` (≥ 30 % of rows and columns within 20 mm of the median)."
+          description: "`wall_fit` (wall face RMS ≤ 3 mm), `opening_bounded` (wall on both sides in ≥ 60 % of rows and columns), `margins` (≥ 50 mm of wall beyond the opening on every side, seen in ≥ 80 % of lines), `unoccluded` (≤ 25 % of the 10 cm ring around the opening empty), `consistent` (≥ 30 % of rows and columns within 20 mm of the median)."
           items: { $ref: "#/components/schemas/Check" }
         opening_width_mm: { type: integer }
         opening_height_mm: { type: integer }
@@ -1213,6 +1213,13 @@ components:
         evidence_url:
           type: string
           description: The evidence image, e.g. `/v1/measurements/{id}/evidence`.
+        site_check:
+          type: object
+          description: Recipe action `measureOpening` only; rescans it made on its own. See recipes.md.
+          properties:
+            rescans: { type: integer }
+            ok: { type: boolean }
+            attempts: { type: array, items: { type: object, additionalProperties: true } }
 
     RecipeSummary:
       type: object

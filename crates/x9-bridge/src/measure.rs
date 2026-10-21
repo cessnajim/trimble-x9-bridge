@@ -20,6 +20,27 @@ const WALL_TOL: f64 = 0.010;
 const FACE_TOL: f64 = 0.008;
 const NEAR: f64 = 0.3;
 const CLEAN_TOL: f64 = 0.020;
+/// Wall wanted beyond each side of the opening, and how often it must be seen.
+pub const MARGIN_WANT: f64 = 0.05;
+const SIDE_SEEN_WANT: f64 = 0.8;
+/// Width of the wall ring around the opening checked for occlusion.
+const RING: f64 = 0.10;
+
+/// Wall beyond one side of the opening.
+#[derive(Debug, Clone)]
+pub struct Side {
+    pub name: &'static str,
+    /// Share of the measuring rows (columns) with wall on this side.
+    pub seen: f64,
+    /// Median wall beyond the opening's edge on this side, in metres.
+    pub margin_m: f64,
+}
+
+impl Side {
+    pub fn ok(&self) -> bool {
+        self.seen >= SIDE_SEEN_WANT && self.margin_m >= MARGIN_WANT
+    }
+}
 const RANSAC_ITERS: usize = 3000;
 const RANSAC_SAMPLE: usize = 60_000;
 
@@ -53,6 +74,11 @@ pub struct Opening {
     /// The measuring row and column through the opening's middle, and the
     /// runs found on them (start, end) in cells.
     pub mid: (usize, usize),
+    /// Left, right, bottom, top.
+    pub sides: [Side; 4],
+    /// Share of the 10 cm wall ring around the opening with no wall points:
+    /// something in front of the wall, which a rescan from here can't fix.
+    pub ring_empty: f64,
     pub row_run: Option<(usize, usize)>,
     pub col_run: Option<(usize, usize)>,
 }
@@ -169,8 +195,9 @@ pub fn opening(all: &[[f64; 3]]) -> Result<Opening, String> {
         }
     }
 
-    // Wall-face points, laid out flat: u along the wall, z up.
-    let t = [-n[1], n[0]];
+    // Wall-face points, laid out flat: u along the wall to the right as seen
+    // from the scanner (n points away from it, so right = n × up), z up.
+    let t = [n[1], -n[0]];
     let mut face = Vec::new();
     let mut sq = 0.0;
     for q in &p {
@@ -284,6 +311,37 @@ pub fn opening(all: &[[f64; 3]]) -> Result<Opening, String> {
     };
     let (width_clean, width_sd_m) = clean(&mut widths);
     let (height_clean, height_sd_m) = clean(&mut heights);
+    // Wall beyond each side, along the same measuring rows and columns.
+    let side = |name: &'static str, lines: std::ops::Range<usize>, edge: &dyn Fn(usize) -> Option<usize>| -> Side {
+        let n = lines.len().max(1);
+        let mut m: Vec<f64> = lines.filter_map(edge).map(|c| c as f64 * CELL).collect();
+        Side { name, seen: m.len() as f64 / n as f64, margin_m: if m.is_empty() { 0.0 } else { median(&mut m) } }
+    };
+    // Margin = wall from the raster's edge up to the opening, on lines whose
+    // middle cell is in the opening.
+    let open_r = |r: usize| wall[r * w + cx] == 0;
+    let open_c = |c: usize| wall[cy * w + c] == 0;
+    let left = side("left", band(rmin, rmax), &|r| if open_r(r) { (0..cx).rev().find(|&i| wall[r * w + i] != 0).map(|i| i + 1) } else { None });
+    let right = side("right", band(rmin, rmax), &|r| if open_r(r) { (cx..w).find(|&i| wall[r * w + i] != 0).map(|b| w - b) } else { None });
+    let bottom = side("bottom", band(cmin, cmax), &|c| if open_c(c) { (0..cy).rev().find(|&i| wall[i * w + c] != 0).map(|i| i + 1) } else { None });
+    let top = side("top", band(cmin, cmax), &|c| if open_c(c) { (cy..h).find(|&i| wall[i * w + c] != 0).map(|b| h - b) } else { None });
+    // Occlusion: empty cells in a ring just outside the opening's box.
+    let ring = (RING / CELL) as usize;
+    let (x0, x1) = (cmin.saturating_sub(ring), (cmax + ring).min(w - 1));
+    let (y0r, y1r) = (rmin.saturating_sub(ring), (rmax + ring).min(h - 1));
+    let (mut ring_cells, mut ring_empty_cells) = (0usize, 0usize);
+    for y in y0r..=y1r {
+        for x in x0..=x1 {
+            if (cmin..=cmax).contains(&x) && (rmin..=rmax).contains(&y) {
+                continue;
+            }
+            ring_cells += 1;
+            if wall[y * w + x] == 0 && label[y * w + x] != lab {
+                ring_empty_cells += 1;
+            }
+        }
+    }
+    let ring_empty = if ring_cells == 0 { 0.0 } else { ring_empty_cells as f64 / ring_cells as f64 };
     let row_run = run(&|i| wall[cy * w + i], w, cx);
     let col_run = run(&|i| wall[i * w + cx], h, cy);
     let mut raster: Vec<u8> = wall.iter().map(|v| (*v != 0) as u8).collect();
@@ -314,6 +372,8 @@ pub fn opening(all: &[[f64; 3]]) -> Result<Opening, String> {
         w,
         h,
         mid: (cy, cx),
+        sides: [left, right, bottom, top],
+        ring_empty,
         row_run,
         col_run,
     })
@@ -366,6 +426,16 @@ pub fn report(o: &Opening) -> (Value, Vec<u8>) {
         check("opening_bounded", covered(o.rows_used, o.rows_tried) >= 0.6 && covered(o.cols_used, o.cols_tried) >= 0.6,
               (covered(o.rows_used, o.rows_tried).min(covered(o.cols_used, o.cols_tried)) * 100.0).round(), "%",
               format!("wall found on both sides in {} of {} rows and {} of {} columns (want ≥ 60 %)", o.rows_used, o.rows_tried, o.cols_used, o.cols_tried)),
+        check("margins", o.sides.iter().all(Side::ok),
+              (o.sides.iter().map(|s| s.margin_m).fold(f64::MAX, f64::min) * 1000.0).round(), "mm",
+              if o.sides.iter().all(Side::ok) {
+                  format!("at least {} mm of wall beyond the opening on every side", mm(MARGIN_WANT))
+              } else {
+                  format!("not enough wall beyond the opening at the {} (want {} mm, seen in ≥ 80 % of lines); a wider close-up fixes this",
+                          o.sides.iter().filter(|s| !s.ok()).map(|s| s.name).collect::<Vec<_>>().join(", "), mm(MARGIN_WANT))
+              }),
+        check("unoccluded", o.ring_empty <= 0.25, (o.ring_empty * 100.0).round(), "%",
+              format!("{}% of the 10 cm wall ring around the opening has no wall points (want ≤ 25 %); if high, something stands in front of the wall, and only moving the scanner helps", (o.ring_empty * 100.0).round())),
         check("consistent", covered(o.width_clean, o.rows_used) >= 0.3 && covered(o.height_clean, o.cols_used) >= 0.3,
               (covered(o.width_clean, o.rows_used).min(covered(o.height_clean, o.cols_used)) * 100.0).round(), "%",
               format!("{} of {} rows and {} of {} columns agree with the median to 20 mm; the rest look obstructed (want ≥ 30 %)",
@@ -390,6 +460,8 @@ pub fn report(o: &Opening) -> (Value, Vec<u8>) {
             "rows_used": o.rows_used,
             "columns_used": o.cols_used,
             "cell_mm": CELL * 1000.0,
+            "sides": o.sides.iter().map(|s| (s.name.to_string(), json!({"seen_pct": (s.seen * 100.0).round(), "margin_mm": mm(s.margin_m), "ok": s.ok()}))).collect::<serde_json::Map<_, _>>(),
+            "ring_empty_pct": (o.ring_empty * 100.0).round(),
             "wall_normal_xy": [(o.normal_xy[0] * 1e4).round() / 1e4, (o.normal_xy[1] * 1e4).round() / 1e4],
         },
     });
@@ -506,6 +578,23 @@ mod tests {
         assert_eq!(v["values"][0]["name"], "opening_width");
         assert!(v["checks"].as_array().unwrap().iter().all(|c| c["ok"] == true), "{}", v["checks"]);
         assert_eq!(&png[1..4], b"PNG");
+    }
+
+    #[test]
+    fn margins_fail_on_the_side_where_the_wall_stops() {
+        // The synthetic wall faces away along n = (0.6, -0.8); seen from the
+        // scanner, right is n × up = (-0.8, -0.6). Crop it 1 cm beyond the
+        // opening on the scanner's right.
+        let right = [-0.8, -0.6];
+        let pts: Vec<[f64; 3]> = synthetic().into_iter().filter(|q| q[0] * right[0] + q[1] * right[1] < 0.61).collect();
+        let o = opening(&pts).unwrap();
+        let r = o.sides.iter().find(|s| s.name == "right").unwrap();
+        assert!(!r.ok(), "right margin {} m, seen {}", r.margin_m, r.seen);
+        assert!(o.sides.iter().filter(|s| s.name != "right").all(Side::ok));
+        let (v, _) = report(&o);
+        let margins = v["checks"].as_array().unwrap().iter().find(|c| c["name"] == "margins").unwrap();
+        assert_eq!(margins["ok"], false);
+        assert!(margins["detail"].as_str().unwrap().contains("right"));
     }
 
     #[test]

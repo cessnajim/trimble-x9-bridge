@@ -2,7 +2,7 @@
 
 id = "window-measurement"
 title = "Measure a window"
-version = "0.2.0"
+version = "0.3.0"
 summary = "Overview scan, an aimed close-up of the window, a checked point export, then the bridge measures the opening and a person confirms it."
 
 [[inputs]]
@@ -59,14 +59,14 @@ id = "measure"
 title = "Measure the opening"
 kind = "action"
 operation = "measureOpening"
-arguments = { scan_id = "{{steps.closeup.scan_id}}" }
+arguments = { scan_id = "{{steps.closeup.scan_id}}", window = "{{steps.aim.window}}", mode = "STD_L2", rescans = 1 }
 
 [[steps]]
 id = "measure_checks"
 title = "Check the measurement"
 kind = "check"
 of = "measure"
-expect = ["wall_fit", "opening_bounded"]
+expect = ["wall_fit", "opening_bounded", "margins", "consistent"]
 
 [[steps]]
 id = "confirm"

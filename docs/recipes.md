@@ -199,6 +199,23 @@ it ends.
 | Argument | What |
 | --- | --- |
 | `scan_id` | The close-up to measure (required) |
+| `window` | The close-up's window (e.g. `"{{steps.aim.window}}"`); needed for rescans |
+| `mode` | Scan mode for rescans (default `STD_L2`) |
+| `rescans` | How many times the bridge may rescan wider on its own (default 0) |
+
+**Site check.** With `window` and `rescans` > 0, a close-up with too little
+wall on a side (the `margins` check) is rescanned wider, without asking a
+person: on the short axis (left/right or top/bottom) by the angle that adds
+about 15 cm at the wall's distance, on both sides, as an area scan under the
+run (a grant covers it; without one it waits for approval, which counts as a
+person intervention), then measured again. The field log says why. Occlusion
+(the `unoccluded` check) is not rescanned: from the same station a rescan sees
+the same obstruction. The output gains `site_check`:
+`{rescans, ok, attempts: [{scan_id, measurement_id, short_sides, opening_width_mm, opening_height_mm}]}`.
+
+On a real X9 (2026-10-21) a deliberately tight close-up measured 1100 mm wide
+with the left margin short; the bridge rescanned 10° wider and measured
+1180 × 1145 mm, matching earlier runs.
 
 Output: the whole `Measurement`: `measurement_id`, `opening_width_mm`,
 `opening_height_mm`, `uncertainty_mm`, `values`, `checks`, `details` and
