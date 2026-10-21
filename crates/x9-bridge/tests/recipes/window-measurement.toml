@@ -2,8 +2,8 @@
 
 id = "window-measurement"
 title = "Measure a window"
-version = "0.3.0"
-summary = "Overview scan, an aimed close-up of the window, a checked point export, then the bridge measures the opening and a person confirms it."
+version = "0.4.0"
+summary = "Overview scan, the agent marks the window, an aimed close-up, a checked point export, then the bridge measures the opening and a person signs off once."
 
 [[inputs]]
 name = "purpose"
@@ -25,6 +25,9 @@ kind = "person"
 instructions = "Draw a box around the window on the overview preview: about 10 cm of wall on each side and above, and down to the floor if sill height matters."
 needs = ["box"]
 preview_of = "overview"
+# The agent marks the window and goes on; the site check widens a short
+# close-up, and a person reviews the box with the measurement at the end.
+review = "final"
 
 [[steps]]
 id = "aim"
@@ -72,6 +75,6 @@ expect = ["wall_fit", "opening_bounded", "margins", "consistent"]
 id = "confirm"
 title = "Confirm the opening"
 kind = "person"
-instructions = "Check the opening against the evidence image: the green area should fill the window up to the wall face. Confirm the size, or correct it."
+instructions = "Check the opening against the evidence image (the green area should fill the window up to the wall face) and the agent's box on the overview. Confirm the size, or correct it."
 needs = ["opening_width_mm", "opening_height_mm"]
 propose_from = "measure"

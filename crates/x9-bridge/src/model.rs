@@ -177,9 +177,13 @@ pub struct GrantRequest {
     pub allow_color: bool,
     #[serde(default)]
     pub run_id: Option<String>,
+    /// How the person gave it, when not in the bridge's own UI: e.g. "asked
+    /// in the chat", or "relayed by the agent: <their words>".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Grant {
     #[serde(flatten)]
     pub req: GrantRequest,

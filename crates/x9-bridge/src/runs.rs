@@ -57,6 +57,10 @@ pub struct Run {
     /// How often a person had to step in. AI-first aims for one: the final
     /// confirmation.
     pub interventions: Interventions,
+    /// Grants the run's scans ran under (`grant_id`, `granted_by`): standing
+    /// permission given before or during the run, which `interventions` does
+    /// not count as a per-run approval.
+    pub authorized_by: Vec<Value>,
 }
 
 /// A run's person interventions. An agent completing its own run's step is
@@ -72,6 +76,10 @@ pub struct Interventions {
     pub corrected: u32,
     /// A person answered a step that had no proposal.
     pub answered: u32,
+    /// Of `total`, how many the agent relayed from the chat (the person said
+    /// it to the agent; the chat client couldn't ask them directly). Marked
+    /// by `confirmed_via` starting with "relayed" in the step's input.
+    pub relayed: u32,
     /// What was changed: `{step_id, field, proposed, given, delta?}`, with
     /// `delta` = given − proposed for numbers.
     pub corrections: Vec<Value>,
@@ -86,9 +94,53 @@ impl Interventions {
                 parts.push(format!("{n} {}", if n == 1 { one } else { many }));
             }
         }
+        if self.relayed > 0 {
+            parts.push(format!("{} relayed by the agent", self.relayed));
+        }
         let what = if parts.is_empty() { String::new() } else { format!(" ({})", parts.join(", ")) };
         format!("{} person intervention{}{what}", self.total, if self.total == 1 { "" } else { "s" })
     }
+}
+
+/// Record the grant a run's scan job was admitted under, if any (once per grant).
+fn note_grant(st: &AppState, run_id: &str, job_id: &str) {
+    let g = {
+        let inner = st.inner.lock().unwrap();
+        let gid = inner.jobs.iter().find(|j| j.job.job_id == job_id).and_then(|j| j.grant_id.clone());
+        gid.and_then(|gid| {
+            inner.grants.iter().find(|g| g.grant_id == gid).map(|g| {
+                let mut v = json!({"grant_id": g.grant_id, "granted_by": g.granted_by});
+                if let Some(n) = &g.req.note {
+                    v["note"] = json!(n);
+                }
+                v
+            })
+        })
+    };
+    if let Some(g) = g {
+        with_run(st, run_id, |rec| {
+            if !rec.run.authorized_by.iter().any(|x| x["grant_id"] == g["grant_id"]) {
+                rec.run.authorized_by.push(g);
+            }
+        });
+    }
+}
+
+/// Scans the run may still start from its current step on: one per
+/// `startScan` step, plus each `measureOpening` step's `rescans`.
+pub fn scans_left(st: &AppState, run_id: &str) -> u32 {
+    with_run(st, run_id, |rec| {
+        let from = rec.run.current_step_id.as_ref().and_then(|c| rec.recipe.steps.iter().position(|s| &s.step_id == c)).unwrap_or(0);
+        rec.recipe.steps[from..]
+            .iter()
+            .map(|s| match s.operation_id.as_deref() {
+                Some("startScan") => 1,
+                Some("measureOpening") => s.arguments.as_ref().and_then(|a| a.get("rescans")).and_then(Value::as_u64).unwrap_or(0) as u32,
+                _ => 0,
+            })
+            .sum()
+    })
+    .unwrap_or(0)
 }
 
 /// Count a person's approval of one of the run's scans.
@@ -152,6 +204,7 @@ pub fn start(st: &Arc<AppState>, caller: Caller, recipe: Recipe, project_id: Str
         steps: recipe.steps.iter().map(|s| StepState { step_id: s.step_id.clone(), state: "pending".into(), job_id: None, output: None, proposal: None }).collect(),
         problem: None,
         interventions: Interventions::default(),
+        authorized_by: Vec::new(),
     };
     let ctx = json!({"project_id": project_id, "input": inputs, "steps": {}});
     let name = caller.name.clone();
@@ -203,6 +256,9 @@ pub fn advance(st: &AppState, run_id: &str, step_id: &str, mut input: Value, by_
         if by_person {
             let iv = &mut rec.run.interventions;
             iv.total += 1;
+            if input.get("confirmed_via").and_then(Value::as_str).is_some_and(|v| v.starts_with("relayed")) {
+                iv.relayed += 1;
+            }
             match &rec.run.steps[i].proposal {
                 None => iv.answered += 1,
                 Some(p) => {
@@ -281,6 +337,7 @@ pub fn cancel(st: &AppState, run_id: &str) -> Result<Run, ApiError> {
     .ok_or_else(|| ApiError::not_found("run"))?;
     if let Some(job_id) = job_id {
         let job = st.inner.lock().unwrap().cancel_job(&job_id);
+        st.save_grants();
         if let Some(j) = job {
             st.emit_job(&j);
         }
@@ -301,7 +358,16 @@ fn finish(st: &AppState, run_id: &str, state: &str, problem: Option<&ApiError>) 
         }
         rec.run.project_id.clone()
     });
-    let iv = snapshot(st, run_id).map(|r| r.interventions.summary()).unwrap_or_default();
+    let iv = snapshot(st, run_id)
+        .map(|r| {
+            let by: Vec<String> = r
+                .authorized_by
+                .iter()
+                .filter_map(|g| g["granted_by"].as_str().map(|n| format!("a grant from {n}{}", g["note"].as_str().map(|x| format!(", {x}")).unwrap_or_default())))
+                .collect();
+            format!("{}{}", r.interventions.summary(), if by.is_empty() { String::new() } else { format!("; scans under {}", by.join(", ")) })
+        })
+        .unwrap_or_default();
     let text = match (state, problem) {
         ("failed", Some(p)) => format!("Run {run_id} failed: {} ({iv})", p.detail.as_deref().unwrap_or(&p.title)),
         _ => format!("Run {run_id} {state} after {iv}"),
@@ -355,6 +421,7 @@ async fn action(st: &Arc<AppState>, run_id: &str, i: usize, step: &RecipeStep, c
             a["project_id"] = ctx["project_id"].clone();
             let req: ScanRequest = serde_json::from_value(a).map_err(bad)?;
             let job = submit_scan(st, caller, req, Some(run_id)).await?;
+            note_grant(st, run_id, &job.job_id);
             let job = wait_job(st, run_id, i, &job.job_id).await?;
             Ok(json!({"job_id": job.job_id, "scan_id": job.result.as_ref().and_then(|r| r.get("scan_id")).cloned()}))
         }
@@ -402,6 +469,7 @@ async fn action(st: &Arc<AppState>, run_id: &str, i: usize, step: &RecipeStep, c
                 let req = ScanRequest { project_id: project_id.clone(), kind: crate::model::ScanKind::Area, mode: mode.clone(), color: false,
                                         window: Some(nw), note: Some("site check rescan, wider".into()) };
                 let job = submit_scan(st, caller, req, Some(run_id)).await?;
+                note_grant(st, run_id, &job.job_id);
                 let job = wait_job(st, run_id, i, &job.job_id).await?;
                 scan_id = job.result.as_ref().and_then(|r| r.get("scan_id")).and_then(Value::as_str).unwrap_or("").to_string();
                 window = Some(nw);
@@ -558,6 +626,7 @@ mod tests {
             steps: vec![],
             problem: None,
             interventions: Interventions::default(),
+            authorized_by: Vec::new(),
         }
     }
 
@@ -580,6 +649,9 @@ mod tests {
         iv.confirmed = 2;
         assert_eq!(iv.summary(), "3 person interventions (1 approval, 2 confirmations)");
         iv.total = 1;
+        iv.relayed = 1;
+        assert!(iv.summary().ends_with("1 relayed by the agent)"), "{}", iv.summary());
+        iv.relayed = 0;
         iv.approvals = 0;
         iv.confirmed = 0;
         iv.corrected = 1;

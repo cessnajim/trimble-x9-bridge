@@ -72,6 +72,12 @@ pub struct RecipeStep {
     /// person only confirms.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub propose_from: Option<String>,
+    /// For `person` steps: when a person looks at the answer. `now` (the
+    /// default): the step waits for a person (the agent may propose). `final`:
+    /// the agent answers it itself and a person reviews it at the run's next
+    /// `now` person step, so the run asks for one sign-off instead of two.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
     /// For `check` steps: the earlier step whose checks are inspected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub of: Option<String>,
@@ -127,7 +133,7 @@ impl Recipe {
         }
         let inputs: HashSet<&str> = self.inputs.iter().map(|i| i.name.as_str()).collect();
         let mut seen: HashSet<&str> = HashSet::new();
-        for s in &self.steps {
+        for (n, s) in self.steps.iter().enumerate() {
             let where_ = format!("step {:?}", s.step_id);
             if !ok_id(&s.step_id) || !seen.insert(&s.step_id) {
                 return Err(format!("{where_}: ids must be unique letters, digits, '-' or '_'"));
@@ -158,6 +164,17 @@ impl Recipe {
             if let Some(p) = &s.preview_of {
                 if !seen.contains(p.as_str()) || p == &s.step_id {
                     return Err(format!("{where_}: `preview_of` must name an earlier step"));
+                }
+            }
+            if let Some(r) = &s.review {
+                if s.kind != "person" {
+                    return Err(format!("{where_}: `review` is for person steps"));
+                }
+                if r != "now" && r != "final" {
+                    return Err(format!("{where_}: `review` must be \"now\" or \"final\""));
+                }
+                if r == "final" && !self.steps[n + 1..].iter().any(|t| t.kind == "person" && t.review.as_deref() != Some("final")) {
+                    return Err(format!("{where_}: `review = \"final\"` needs a later person step (review now) where a person reviews it"));
                 }
             }
             if let Some(p) = &s.propose_from {
@@ -304,6 +321,17 @@ expect = ["point_count"]
         assert!(Recipe::parse(&dup).unwrap_err().contains("unique"));
         let bad_input = GOOD.replace("{{input.purpose}}", "{{input.nope}}");
         assert!(Recipe::parse(&bad_input).is_err());
+    }
+
+    #[test]
+    fn review_final_needs_a_later_person_step() {
+        let final_box = GOOD.replace("preview_of = \"overview\"", "preview_of = \"overview\"\nreview = \"final\"");
+        assert!(Recipe::parse(&final_box).unwrap_err().contains("later person step"));
+        let with_signoff = format!("{final_box}[[steps]]\nid = \"confirm\"\nkind = \"person\"\ninstructions = \"Confirm.\"\nneeds = [\"ok\"]\n");
+        let r = Recipe::parse(&with_signoff).unwrap();
+        assert_eq!(r.steps[1].review.as_deref(), Some("final"));
+        let bad = GOOD.replace("preview_of = \"overview\"", "preview_of = \"overview\"\nreview = \"later\"");
+        assert!(Recipe::parse(&bad).unwrap_err().contains("now"));
     }
 
     #[test]

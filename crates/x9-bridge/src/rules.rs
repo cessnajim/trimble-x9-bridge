@@ -94,6 +94,7 @@ mod tests {
                 allowed_modes: modes.iter().map(|m| m.to_string()).collect(),
                 allow_color: color,
                 run_id: None,
+                note: None,
             },
             grant_id: "g1".into(),
             granted_by: "jim".into(),

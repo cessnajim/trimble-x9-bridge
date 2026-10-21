@@ -396,6 +396,47 @@ try:
         check("run steps are in the field log", any(e["kind"] == "run" and "started" in e["text"] for e in log)
               and any("Waiting for a person" in e["text"] for e in log), [e["text"] for e in log][-6:])
 
+        # AI-first, one intervention: a standing grant given at setup, the agent
+        # marks the window itself (review = "final"), one sign-off at the end.
+        s, gp = call("POST", "/grants", "operator", {"project_id": pid, "expires_at": "2099-01-01T00:00:00Z", "max_scans": 3})
+        s, run1 = call("POST", "/runs", "agent", {"recipe_id": "window-measurement", "project_id": pid, "inputs": {"purpose": "blinds"}})
+        rid1 = run1["run_id"]
+        r = wait_run(rid1, lambda r: r["waiting_for"] in ("approval", "input"), timeout=120)
+        check("one-intervention run: the overview runs under the project grant, no approval", r["waiting_for"] == "input"
+              and r["current_step_id"] == "box" and r["interventions"]["approvals"] == 0, r)
+        s, b = call("POST", f"/runs/{rid1}/advance", "agent", {"step_id": "box", "input": {"box": box}})
+        r = wait_run(rid1, lambda r: r["current_step_id"] == "confirm" and r["waiting_for"] == "input", timeout=300)
+        check("the agent's own box is not an intervention; the run goes straight to the sign-off",
+              r["current_step_id"] == "confirm" and r["interventions"]["total"] == 0, r.get("interventions"))
+        prop1 = {x["step_id"]: x for x in r["steps"]}["confirm"].get("proposal", {})
+        s, b = call("POST", f"/runs/{rid1}/advance", "operator", {"step_id": "confirm", "input": prop1.get("input", {})})
+        r = wait_run(rid1, lambda r: False, timeout=10)
+        iv = r.get("interventions", {})
+        check("one-intervention run: 1 person intervention (the sign-off), scans under the operator's grant",
+              r["state"] == "succeeded" and iv.get("total") == 1 and iv.get("confirmed") == 1 and iv.get("approvals") == 0
+              and [g["grant_id"] for g in r.get("authorized_by", [])] == [gp["grant_id"]]
+              and r["authorized_by"][0]["granted_by"] == "operator-1", (iv, r.get("authorized_by")))
+        _, log = call("GET", f"/log?project_id={pid}", "viewer")
+        check("the run's last log line names the grant", any(e["kind"] == "run" and rid1 in e["text"] and "succeeded after 1 person intervention" in e["text"]
+              and "a grant from operator-1" in e["text"] for e in log), [e["text"] for e in log if rid1 in e["text"]])
+        call("DELETE", f"/grants/{gp['grant_id']}", "operator")
+
+        # Without a grant, one approval can cover the whole run.
+        s, run2 = call("POST", "/runs", "agent", {"recipe_id": "window-measurement", "project_id": pid, "inputs": {"purpose": "trim"}})
+        rid2 = run2["run_id"]
+        r = wait_run(rid2, lambda r: r["waiting_for"] == "approval")
+        s, b = call("POST", f"/jobs/{r['steps'][0]['job_id']}/approve", "agent", {"run": True})
+        check("an agent can't approve its run (403)", s == 403, b)
+        s, b = call("POST", f"/jobs/{r['steps'][0]['job_id']}/approve", "operator", {"run": True})
+        _, gl = call("GET", "/grants", "viewer")
+        rg = [g for g in gl if g.get("run_id") == rid2]
+        check("approving the run grants its later scans: the close-up and one site-check rescan",
+              s == 200 and b["state"] == "queued" and len(rg) == 1 and rg[0]["max_scans"] == 2 and rg[0]["granted_by"] == "operator-1", (b, rg))
+        r = wait_run(rid2, lambda r: r["waiting_for"] == "input")
+        check("... counted as one approval", r["interventions"]["approvals"] == 1 and r["interventions"]["total"] == 1, r["interventions"])
+        call("POST", f"/runs/{rid2}/cancel", "agent")
+        wait_run(rid2, lambda r: False, timeout=10)
+
     s, job3 = call("POST", "/scans", "agent", area)
     check("grant used up: next scan waits for approval", s == 202 and job3["state"] == "awaiting_approval", job3)
     s, b = call("POST", f"/jobs/{job3['job_id']}/cancel", "agent")
@@ -491,6 +532,20 @@ try:
     check("agent adds a log note", s == 201 and b["author"] == "agent-1", b)
     time.sleep(0.3)
     check("event stream delivered job and log events", "job" in events and "log" in events, sorted(set(events)))
+
+    # Grants survive a restart: a second bridge on the same data directory has them.
+    s, gk = call("POST", "/grants", "operator", {"project_id": pid, "expires_at": "2099-01-01T00:00:00Z", "max_scans": 7})
+    s, gr = call("POST", "/grants", "operator", {"project_id": pid, "expires_at": "2099-01-01T00:00:00Z", "max_scans": 5})
+    call("DELETE", f"/grants/{gr['grant_id']}", "operator")
+    procs.append(subprocess.Popen([f"{BIN}/x9-bridge"], env={**os.environ, "X9_BASE": f"http://{MOCK}/api/v1",
+                                  "BRIDGE_ADDR": "127.0.0.1:8796", "BRIDGE_TOKENS": tokfile, "BRIDGE_DATA": os.path.join(tmp, "data")},
+                                  stderr=subprocess.DEVNULL))
+    wait_up("127.0.0.1:8796", "/v1/health")
+    s, gl = call("GET", "/grants", "viewer", base="127.0.0.1:8796")
+    ids = [g["grant_id"] for g in gl] if s == 200 else []
+    check("grants survive a restart (a revoked one doesn't)", gk["grant_id"] in ids and gr["grant_id"] not in ids
+          and next(g for g in gl if g["grant_id"] == gk["grant_id"])["max_scans"] == 7, (s, ids))
+    call("DELETE", f"/grants/{gk['grant_id']}", "operator")
 
     # A bridge whose scanner is unreachable.
     procs.append(subprocess.Popen([f"{BIN}/x9-bridge"], env={**os.environ, "X9_BASE": "http://127.0.0.1:9/api/v1",

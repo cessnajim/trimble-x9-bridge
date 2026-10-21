@@ -103,6 +103,7 @@ async fn run_scan(st: &AppState, job_id: &str) {
         Idle::Cancelled => {
             // The scanner never got this scan: give its grant use back.
             st.inner.lock().unwrap().refund_grant(job_id);
+            st.save_grants();
             return finish(st, job_id, JobState::Cancelled, None, None);
         }
         Idle::Failed(e) => return finish(st, job_id, JobState::Failed, None, Some(&e)),

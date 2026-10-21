@@ -416,6 +416,20 @@ paths:
       tags: [approvals]
       operationId: approveJob
       summary: Approve one job that is awaiting approval (operator only).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                run:
+                  type: boolean
+                  default: false
+                  description: >-
+                    For a recipe run's scan: also grant the run its later scans
+                    (later startScan steps plus measureOpening rescans) for 2 hours,
+                    counted as one approval.
       responses:
         "200":
           description: Approved and queued.
@@ -1390,6 +1404,14 @@ components:
           description: For `person` steps, the fields `advance` must supply.
           items: { type: string }
         preview_of: { type: string, description: For `person` steps, an earlier step whose scan preview to show. }
+        propose_from: { type: string, description: For `person` steps, an earlier step whose output the bridge proposes as the answer. }
+        review:
+          type: string
+          enum: [now, final]
+          default: now
+          description: >-
+            For `person` steps. `final`: the agent answers the step itself and a
+            person reviews it at the next `now` person step.
         of: { type: string, description: For `check` steps, the earlier step whose checks are inspected. }
         expect:
           type: array
@@ -1417,6 +1439,14 @@ components:
         finished_at: { type: [string, "null"], format: date-time }
         problem: { $ref: "#/components/schemas/Problem" }
         current_step_id: { type: [string, "null"] }
+        authorized_by:
+          type: array
+          description: Grants the run's scans ran under (standing permission, not counted in `interventions`).
+          items:
+            type: object
+            properties:
+              grant_id: { type: string }
+              granted_by: { type: string }
         interventions:
           type: object
           description: How often a person stepped in; see recipes.md "Person interventions".

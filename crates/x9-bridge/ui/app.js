@@ -48,6 +48,7 @@ const S = {
   aim: {},         // scan_id -> aim result
   exports: {},     // export_id -> export record
   measurements: {}, // measurement_id -> measurement record
+  grants: [],      // active grants
   evidence: new Map(), // measurement_id -> object URL | "loading" | {error}
   watchMeasure: {}, // scan_id -> job_id
   watchExport: {}, // scan_id -> job_id
@@ -173,6 +174,16 @@ const upsert = (list, item, key) => {
   if (i >= 0) list[i] = item; else list.unshift(item);
 };
 const byNewest = (a, b) => String(b.created_at).localeCompare(String(a.created_at));
+// A run only moves forward. A reply to a request can arrive after the event
+// stream has already delivered a newer state (a sign-off that finishes the run
+// at once), so never let an older copy replace a newer one.
+const runProgress = (r) => (["succeeded", "failed", "cancelled"].includes(r.state) ? 1e6 : 0)
+  + 10 * (r.steps || []).filter((s) => s.state === "done").length + (r.interventions?.total ?? 0);
+function upsertRun(r) {
+  const e = S.runs.find((x) => x.run_id === r.run_id);
+  if (e && runProgress(r) < runProgress(e)) return;
+  upsert(S.runs, r, "run_id");
+}
 
 async function load(what) {
   try {
@@ -190,6 +201,7 @@ async function load(what) {
         break;
       case "modes": S.modes = await api("/scan-modes"); break;
       case "log": S.log = (await api("/log")).reverse(); break;
+      case "grants": S.grants = await api("/grants"); break;
       case "scans":
         S.scans = S.project ? await api(`/scans?project_id=${encodeURIComponent(S.project)}`) : [];
         for (const sc of S.scans) S.scanById[sc.scan_id] = sc;
@@ -298,7 +310,7 @@ function onEvent(chunk) {
       }
     }
   } else if (kind === "run") {
-    upsert(S.runs, v, "run_id");
+    upsertRun(v);
     S.runs.sort(byNewest);
   } else if (kind === "log") {
     if (!S.log.some((e) => e.entry_id === v.entry_id)) S.log.unshift(v);
@@ -338,7 +350,7 @@ async function stream() {
 }
 
 function refreshAll() {
-  ["status", "jobs", "runs", "recipes", "projects", "modes", "log", "scans"].forEach(load);
+  ["status", "jobs", "runs", "recipes", "projects", "modes", "log", "scans", "grants"].forEach(load);
 }
 
 // ----------------------------------------------------------------- routes ---
@@ -385,9 +397,16 @@ const ICONS = {
   log: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l4 4v14H6z"/><path d="M9 11h7M9 15h7M9 7h4"/></svg>',
 };
 
+const stepDef = (r, sid) => { const rec = S.recipe[r.recipe_id]; return typeof rec === "object" && rec.steps ? rec.steps.find((s) => (s.id ?? s.step_id) === sid) : null; };
+// A person step with review = "final" is the agent's to answer; a person sees it at the sign-off.
+const agentsStep = (r) => stepDef(r, r.current_step_id)?.review === "final";
+const waitsForPerson = (r) => r.state === "waiting_for_person" && r.waiting_for === "input" && !agentsStep(r);
+
+const runChip = (r) => (r.state === "waiting_for_person" && r.waiting_for === "input" && agentsStep(r) ? `<span class="chip info">agent's turn</span>` : stateChip(r.state));
+
 function needsYou() {
   const approvals = isOp() ? S.jobs.filter((j) => j.state === "awaiting_approval").length : 0;
-  const inputs = S.runs.filter((r) => r.state === "waiting_for_person" && r.waiting_for === "input" && mayAdvance(r)).length;
+  const inputs = S.runs.filter((r) => waitsForPerson(r) && mayAdvance(r)).length;
   return approvals + inputs;
 }
 const mayAdvance = (r) => S.me && (isOp() || r.started_by === S.me.name);
@@ -421,6 +440,8 @@ function viewNav() {
   return `<nav class="nav">${tab("now", "Now")}${tab("runs", "Runs")}${tab("scans", "Scans")}${tab("log", "Log")}</nav>`;
 }
 
+const RUN_HOURS = 2;
+
 function jobCard(j, { actions = true } = {}) {
   const phase = j.phase ? PHASES[j.phase] ?? j.phase : j.state === "queued" ? "Queued" : "";
   const pct = typeof j.progress === "number" ? Math.round(j.progress * 100) : null;
@@ -435,8 +456,10 @@ function jobCard(j, { actions = true } = {}) {
     ${j.problem ? `<div class="problem">${esc(problemText(j.problem))}</div>` : ""}
     ${partial}
     ${scanLink && !running ? `<div class="meta" style="margin-top:6px">${scanLink}</div>` : ""}
+    ${actions && j.state === "awaiting_approval" && isOp() && j.run_id ? `<p class="hint">Part of a recipe run. Approving the run lets its later scans go ahead too (for ${RUN_HOURS} hours).</p>` : ""}
     ${actions && j.state === "awaiting_approval" && isOp() ? `<div class="btns">
-      <button class="btn good" data-act="approve" data-id="${esc(j.job_id)}" ${S.busy ? "disabled" : ""}>Approve</button>
+      ${j.run_id ? `<button class="btn good" data-act="approve-run" data-id="${esc(j.job_id)}" ${S.busy ? "disabled" : ""}>Approve the run</button>` : ""}
+      <button class="btn ${j.run_id ? "" : "good"}" data-act="approve" data-id="${esc(j.job_id)}" ${S.busy ? "disabled" : ""}>${j.run_id ? "Only this scan" : "Approve"}</button>
       <button class="btn danger" data-act="cancel-job" data-id="${esc(j.job_id)}" ${S.busy ? "disabled" : ""}>Deny</button></div>` : ""}
     ${actions && j.state === "awaiting_approval" && !isOp() ? `<p class="hint">Waiting for an operator to approve.</p>` : ""}
     ${actions && running && mayCancelJob(j) ? `<div class="btns"><button class="btn danger" data-act="cancel-job" data-id="${esc(j.job_id)}" ${S.busy ? "disabled" : ""}>Stop</button></div>` : ""}
@@ -471,7 +494,7 @@ function viewNow() {
   }
 
   const approvals = S.jobs.filter((j) => j.state === "awaiting_approval");
-  const waiting = S.runs.filter((r) => r.state === "waiting_for_person" && r.waiting_for === "input");
+  const waiting = S.runs.filter((r) => { if (!S.recipe[r.recipe_id]) recipe(r.recipe_id); return waitsForPerson(r); });
   const active = S.jobs.filter((j) => j.state === "running" || j.state === "queued");
   const recent = S.jobs.filter((j) => ["succeeded", "failed", "cancelled"].includes(j.state)).slice(0, 5);
 
@@ -515,7 +538,7 @@ function viewRuns() {
     : `<p class="empty">No recipes installed on this bridge.</p>`;
   const runs = S.runs.length
     ? S.runs.map((r) => `<a class="card link ${r.state === "waiting_for_person" ? "attn" : ""}" href="#/run/${encodeURIComponent(r.run_id)}">
-        <div class="line"><strong class="grow ellip">${esc(recipeTitle(r.recipe_id))}</strong>${stateChip(r.state)}</div>
+        <div class="line"><strong class="grow ellip">${esc(recipeTitle(r.recipe_id))}</strong>${runChip(r)}</div>
         <div class="meta">by ${esc(r.started_by)} · ${esc(ago(r.created_at))}${r.current_step_id && !["succeeded"].includes(r.state) ? ` · step “${esc(r.current_step_id)}”` : ""}</div></a>`).join("")
     : `<p class="empty">No runs yet.</p>`;
   return `<h2>Start a recipe</h2><section>${recipes}</section><h2>Runs</h2><section>${runs}</section>`;
@@ -581,12 +604,33 @@ function viewRun(id) {
     const src = d.propose_from ? r.steps.find((x) => x.step_id === d.propose_from)?.output : null;
     const fields = needs.filter((n) => n !== "box").map((n) => `<label class="field"><span>${esc(FIELD(n))}</span>${String(val(n)).length > 40 ? `<textarea name="${esc(n)}">${esc(val(n))}</textarea>` : `<input type="text" name="${esc(n)}" value="${esc(val(n))}" autocomplete="off">`}</label>`).join("");
     const changed = prop && (S.userDrew[key] || false);
+    // At the sign-off, show what the agent decided by itself earlier in the run.
+    const decided = d.review === "final" ? [] : r.steps.filter((s) => s.state === "done" && def(s.step_id)?.review === "final");
+    const reviewed = decided.map((s) => {
+      const sd = def(s.step_id);
+      const scan = sd.preview_of ? r.steps.find((x) => x.step_id === sd.preview_of)?.output?.scan_id : null;
+      const k = `review:${r.run_id}:${s.step_id}`;
+      if (s.output?.box) { S.boxes[k] = s.output.box; S.drawMode[k] = false; }
+      return `<div class="review"><h4>${esc(sd.title ?? s.step_id)}: decided by the agent</h4>
+        ${s.output?.box && scan ? picker(k, scan, { readonly: true }) : `<div class="meta">${stepOutput(s, sd)}</div>`}</div>`;
+    }).join("");
+    if (d.review === "final") {
+      panel = `<div class="card"><h3>${esc(d.title ?? cur.step_id)}</h3>
+        <p>The agent decides this step and goes on; you review it with the result at the end.</p>
+        ${prop ? `<div class="note">${esc(prop.by)} proposed: “${esc(prop.note ?? "an answer")}”.</div>` : ""}
+        <p class="hint">${esc(d.instructions ?? "")}</p>
+        ${mayAdvance(r) ? `<details><summary class="hint">Answer it yourself instead</summary>
+          ${needs.includes("box") ? (previewScan ? picker(key, previewScan) : "") : ""}
+          <form data-form="advance" data-run="${esc(r.run_id)}" data-step="${esc(cur.step_id)}" data-key="${esc(key)}">${fields}
+          <button class="btn primary wide" ${S.busy || (needs.includes("box") && !S.boxes[key]) ? "disabled" : ""}>Continue with my answer</button></form></details>` : ""}</div>`;
+    } else
     panel = `<div class="card attn"><h3>${esc(prop ? `Check ${prop.by}'s answer` : d.title ?? cur.step_id)}</h3>
       ${prop ? `<div class="note">${esc(prop.by)} proposed this ${esc(ago(prop.at))}${prop.note ? `: “${esc(prop.note)}”` : "."} Confirm it, or adjust it first.</div>
         <p class="hint">The step asks: ${esc(d.instructions ?? "")}</p>`
         : `<p>${esc(d.instructions ?? "This step needs your input.")}</p><p class="hint">Waiting for the agent to propose an answer. You can also give it yourself.</p>`}
       ${needs.includes("box") ? (previewScan ? picker(key, previewScan) : `<div class="problem">No preview to draw on.</div>`) : ""}
       ${src?.measurement_id ? measurementCard(src) : ""}
+      ${reviewed ? `<h4>Also check what the agent decided</h4>${reviewed}` : ""}
       ${mayAdvance(r) ? `<form data-form="advance" data-run="${esc(r.run_id)}" data-step="${esc(cur.step_id)}" data-key="${esc(key)}">${fields}
         <button class="btn ${prop && !changed ? "good" : "primary"} wide" ${S.busy || (needs.includes("box") && !S.boxes[key]) ? "disabled" : ""}>${prop ? (changed ? "Continue with my box" : "Looks right") : "Continue"}</button></form>`
         : `<p class="hint">Only ${esc(r.started_by)} or an operator can continue this run.</p>`}</div>`;
@@ -606,9 +650,10 @@ function viewRun(id) {
   }).join("");
 
   return `<section><div class="card">
-      <div class="line"><h3 class="grow">${esc(recipeTitle(r.recipe_id))}</h3>${stateChip(r.state)}</div>
+      <div class="line"><h3 class="grow">${esc(recipeTitle(r.recipe_id))}</h3>${runChip(r)}</div>
       <div class="meta">Started by ${esc(r.started_by)} · ${esc(ago(r.created_at))}</div>
       ${r.interventions ? `<div class="meta">${esc(interventionText(r.interventions))}</div>` : ""}
+      ${(r.authorized_by || []).length ? `<div class="meta">Scans under ${esc(r.authorized_by.map((g) => `a grant from ${g.granted_by}`).join(", "))}</div>` : ""}
       ${(r.interventions?.corrections || []).map((c) => `<div class="note">Corrected “${esc(c.field)}” in step “${esc(c.step_id)}”${c.delta != null ? `: ${c.delta > 0 ? "+" : ""}${esc(c.delta)}` : ""} (proposed ${esc(typeof c.proposed === "object" ? JSON.stringify(c.proposed) : c.proposed)}, given ${esc(typeof c.given === "object" ? JSON.stringify(c.given) : c.given)})</div>`).join("")}
       ${r.problem ? `<div class="problem">${esc(problemText(r.problem))}</div>` : ""}
     </div></section>
@@ -617,9 +662,9 @@ function viewRun(id) {
     ${!final && mayAdvance(r) ? `<button class="btn danger wide" data-act="cancel-run" data-id="${esc(r.run_id)}" ${S.busy ? "disabled" : ""}>Cancel run</button>` : ""}`;
 }
 
-function picker(key, scanId) {
+function picker(key, scanId, { readonly = false } = {}) {
   const p = preview(scanId);
-  const draw = S.drawMode[key] ?? true;
+  const draw = readonly ? false : S.drawMode[key] ?? true;
   const b = S.boxes[key];
   const dims = S.dims[scanId];
   let img;
@@ -629,6 +674,7 @@ function picker(key, scanId) {
     const box = b && dims ? `<div class="boxsel" style="left:${(b.x0 / (2 * dims[0])) * 100}%;top:${(b.y0 / dims[1]) * 100}%;width:${(span(b, dims[0]) / (2 * dims[0])) * 100}%;height:${((b.y1 - b.y0) / dims[1]) * 100}%"></div>` : "";
     img = `<div class="pano" data-keep-scroll="${esc(key)}"><div class="pano-in ${draw ? "draw" : ""}" data-picker="${esc(key)}" data-scan="${esc(scanId)}"><img src="${esc(p)}" alt="Scan preview" data-dims="${esc(scanId)}"><img src="${esc(p)}" alt="" aria-hidden="true" class="seam">${box}</div></div>`;
   }
+  if (readonly) return `${img}<p class="hint">${b && dims ? `The agent's box, ${span(b, dims[0])} × ${b.y1 - b.y0} px. Scroll to see all of it.` : ""}</p>`;
   return `<div class="pano-tools"><span class="seg"><button type="button" class="${draw ? "on" : ""}" data-act="draw" data-key="${esc(key)}" data-on="1">Draw box</button><button type="button" class="${draw ? "" : "on"}" data-act="draw" data-key="${esc(key)}" data-on="0">Pan</button></span>
     ${b ? `<button type="button" class="btn small" data-act="clear-box" data-key="${esc(key)}">Clear</button>` : ""}</div>
     ${img}
@@ -642,6 +688,7 @@ function viewScans() {
       <select data-change="project"><option value="">Choose a project…</option>${opts}</select></label>
     ${canAct() ? `<div class="btns"><button class="btn" data-act="sheet-project">New project</button>
       <button class="btn primary" data-act="sheet-scan" ${S.project ? "" : "disabled"}>New scan</button></div>` : ""}
+    ${S.project ? grantCard() : ""}
     ${S.project && S.scans.length ? `<a class="btn wide" href="#/view/${encodeURIComponent([...S.scans].sort(byNewest)[0].scan_id)}">View the latest scan, and follow new ones</a>` : ""}</div>`;
   if (!S.project) return head;
   const stations = new Map();
@@ -660,6 +707,19 @@ function viewScans() {
       ${st.areas.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at))).map((a, i) => `<div class="subscan">${row(a, `Area scan ${i + 1}`)}</div>`).join("")}</div>`;
   }).join("") : `<p class="empty">No scans in this project yet.</p>`;
   return head + `<h2>Scans</h2><section>${list}</section>`;
+}
+
+// Standing permission for agents to scan in the chosen project: given once at
+// setup, so the agent's runs need no approval per scan or per run.
+const GRANT_HOURS = 4, GRANT_SCANS = 12;
+function grantCard() {
+  const now = Date.now();
+  const gs = S.grants.filter((g) => g.project_id === S.project && !g.run_id && Date.parse(g.expires_at) > now);
+  const list = gs.map((g) => `<div class="line"><span class="meta">Agents may scan here until ${esc(clock(g.expires_at))} (${g.max_scans == null ? "any number" : `${g.max_scans - g.scans_used} of ${g.max_scans} left`}), from ${esc(g.granted_by)}</span>
+    ${isOp() ? `<button class="btn small" data-act="revoke-grant" data-id="${esc(g.grant_id)}" ${S.busy ? "disabled" : ""}>Revoke</button>` : ""}</div>`).join("");
+  if (!gs.length && !isOp()) return `<p class="meta grantbox">An operator can let agents scan here.</p>`;
+  return `<div class="grantbox">${list || `<p class="meta">Agents need an approval for each run's scans in this project.</p>`}
+    ${isOp() && !gs.length ? `<button class="btn wide" data-act="grant-project" ${S.busy ? "disabled" : ""}>Let agents scan here for ${GRANT_HOURS} hours (up to ${GRANT_SCANS} scans)</button>` : ""}</div>`;
 }
 
 function viewScan(id) {
@@ -945,6 +1005,13 @@ const actions = {
   "sheet-scan": () => { S.sheet = { type: "scan" }; load("projects"); render(true); },
   "sheet-run": (el) => { S.sheet = { type: "run", id: el.dataset.id }; load("projects"); render(true); },
   "sheet-project": () => { S.sheet = { type: "project" }; render(true); },
+  "approve-run": (el) => act(() => api(`/jobs/${encodeURIComponent(el.dataset.id)}/approve`, { method: "POST", body: { run: true } }).then((j) => { upsert(S.jobs, j, "job_id"); load("grants"); }), "Run approved"),
+  "grant-project": () => act(async () => {
+    const expires = new Date(Date.now() + GRANT_HOURS * 3600e3).toISOString().replace(/\.\d+Z$/, "Z");
+    await api("/grants", { method: "POST", body: { project_id: S.project, expires_at: expires, max_scans: GRANT_SCANS } });
+    await load("grants");
+  }, "Agents may scan here"),
+  "revoke-grant": (el) => act(async () => { await api(`/grants/${encodeURIComponent(el.dataset.id)}`, { method: "DELETE" }); await load("grants"); }, "Permission revoked"),
   approve: (el) => act(() => api(`/jobs/${encodeURIComponent(el.dataset.id)}/approve`, { method: "POST" }).then((j) => upsert(S.jobs, j, "job_id")), "Approved"),
   "cancel-job": (el) => {
     const j = S.jobs.find((x) => x.job_id === el.dataset.id);
@@ -954,7 +1021,7 @@ const actions = {
   },
   "cancel-run": (el) => {
     if (!confirm("Cancel this run? A scan in progress is stopped too.")) return;
-    return act(() => api(`/runs/${encodeURIComponent(el.dataset.id)}/cancel`, { method: "POST" }).then((r) => upsert(S.runs, r, "run_id")), "Cancelling");
+    return act(() => api(`/runs/${encodeURIComponent(el.dataset.id)}/cancel`, { method: "POST" }).then((r) => upsertRun(r)), "Cancelling");
   },
   draw: (el) => { S.drawMode[el.dataset.key] = el.dataset.on === "1"; render(true); },
   "clear-box": (el) => { delete S.boxes[el.dataset.key]; S.userDrew[el.dataset.key] = true; render(true); },
@@ -1037,7 +1104,7 @@ const forms = {
       inputs[el.name.slice(3)] = el.inputMode === "decimal" && v !== "" && !isNaN(Number(v)) ? Number(v) : v;
     }
     const r = await api("/runs", { method: "POST", body: { recipe_id: f.dataset.id, project_id: f.project_id.value, inputs } });
-    upsert(S.runs, r, "run_id");
+    upsertRun(r);
     S.sheet = null;
     location.hash = `#/run/${encodeURIComponent(r.run_id)}`;
   }, "Run started"),
@@ -1054,7 +1121,7 @@ const forms = {
     const box = S.boxes[f.dataset.key];
     if (box) input.box = box;
     const r = await api(`/runs/${encodeURIComponent(f.dataset.run)}/advance`, { method: "POST", body: { step_id: f.dataset.step, input } });
-    upsert(S.runs, r, "run_id");
+    upsertRun(r);
   }, "Sent"),
   project: (f) => act(async () => {
     const p = await api("/projects", { method: "POST", body: { name: f.name.value.trim() } });

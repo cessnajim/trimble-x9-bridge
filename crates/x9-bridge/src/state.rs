@@ -125,6 +125,51 @@ impl AppState {
         }
     }
 
+    fn grants_path(&self) -> std::path::PathBuf {
+        self.data_dir.join("grants.json")
+    }
+
+    /// Write the grants to `grants.json`, so a restart (a link coming up, a
+    /// reboot) keeps the permission a person gave for the visit. Call after
+    /// every change: a grant given, used, given back or revoked.
+    pub fn save_grants(&self) {
+        let gs = self.inner.lock().unwrap().grants.clone();
+        let path = self.grants_path();
+        let tmp = path.with_extension(format!("json.{}", new_id("tmp")));
+        let res = serde_json::to_vec_pretty(&gs)
+            .map_err(std::io::Error::other)
+            .and_then(|b| std::fs::write(&tmp, b))
+            .and_then(|_| std::fs::rename(&tmp, &path));
+        if let Err(e) = res {
+            let _ = std::fs::remove_file(&tmp);
+            self.log("error", format!("Could not save grants: {e}"), "bridge", None, &[]);
+        }
+    }
+
+    /// Load the grants saved before a restart, dropping expired ones.
+    /// Returns how many are active.
+    pub fn load_grants(&self) -> usize {
+        let Ok(bytes) = std::fs::read(self.grants_path()) else { return 0 };
+        let gs: Vec<Grant> = match serde_json::from_slice(&bytes) {
+            Ok(g) => g,
+            Err(e) => {
+                self.log("error", format!("Ignoring grants.json: {e}"), "bridge", None, &[]);
+                return 0;
+            }
+        };
+        let now = crate::util::now_unix();
+        let live: Vec<Grant> = gs
+            .into_iter()
+            .filter_map(|mut g| {
+                g.expires_unix = crate::util::parse_rfc3339(&g.req.expires_at)?;
+                (g.expires_unix > now).then_some(g)
+            })
+            .collect();
+        let n = live.len();
+        self.inner.lock().unwrap().grants = live;
+        n
+    }
+
     /// Who is calling, from `Authorization: Bearer <token>`.
     pub fn caller(&self, headers: &HeaderMap) -> Result<Caller, ApiError> {
         let token = headers
@@ -228,6 +273,7 @@ mod tests {
             allowed_modes: vec![],
             allow_color: false,
             run_id: None,
+            note: None,
         };
         Grant { req, grant_id: "g1".into(), granted_by: "operator-1".into(), scans_used: used, expires_unix: u64::MAX }
     }

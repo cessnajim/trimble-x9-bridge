@@ -252,6 +252,7 @@ pub async fn submit_scan(st: &Arc<AppState>, c: &crate::model::Caller, req: Scan
         crate::model::ScanKind::Area => "area",
     };
     let waiting = if job.state == JobState::AwaitingApproval { ", awaiting approval" } else { "" };
+    st.save_grants();
     let note = req.note.as_deref().map(|n| format!(": {n}")).unwrap_or_default();
     st.log("scan", format!("{what} {} scan requested{waiting}{note}", req.mode), &c.name, Some(&req.project_id), &[("job_id", &job.job_id)]);
     st.emit_job(&job);
@@ -283,13 +284,25 @@ async fn cancel_job(State(st): St, h: HeaderMap, Path(id): Path<String>) -> ApiR
         // A running job is stopped by whoever runs it: the scan worker or the export.
         (inner.cancel_job(&id).ok_or_else(|| ApiError::not_found("job"))?, project_id)
     };
+    st.save_grants();
     st.log("scan", format!("Cancel requested for {id}"), &c.name, Some(&project_id), &[("job_id", &id)]);
     st.emit_job(&job);
     Ok(Json(job))
 }
 
-async fn approve_job(State(st): St, h: HeaderMap, Path(id): Path<String>) -> ApiResult<Json<Job>> {
+#[derive(Deserialize, Default)]
+struct ApproveReq {
+    /// For a run's scan: also grant the run the scans it may still start.
+    #[serde(default)]
+    run: bool,
+}
+
+/// Hours a run approval lasts.
+const RUN_APPROVAL_HOURS: u64 = 2;
+
+async fn approve_job(State(st): St, h: HeaderMap, Path(id): Path<String>, body: Bytes) -> ApiResult<Json<Job>> {
     let c = st.require(&h, Role::is_operator, "approve jobs")?;
+    let opts: ApproveReq = if body.iter().all(u8::is_ascii_whitespace) { ApproveReq::default() } else { parse(&body)? };
     let (job, project_id) = {
         let mut inner = st.inner.lock().unwrap();
         let rec = inner.jobs.iter_mut().find(|j| j.job.job_id == id).ok_or_else(|| ApiError::not_found("job"))?;
@@ -301,6 +314,25 @@ async fn approve_job(State(st): St, h: HeaderMap, Path(id): Path<String>) -> Api
     };
     if let Some(run_id) = &job.run_id {
         crate::runs::note_approval(&st, run_id);
+        // One approval for the whole run: grant it the scans after this one.
+        let more = crate::runs::scans_left(&st, run_id).saturating_sub(1);
+        if opts.run && more > 0 {
+            let expires_unix = now_unix() + RUN_APPROVAL_HOURS * 3600;
+            let req = GrantRequest {
+                project_id: project_id.clone(),
+                expires_at: crate::util::rfc3339(expires_unix),
+                max_scans: Some(more),
+                allowed_modes: Vec::new(),
+                allow_color: false,
+                run_id: Some(run_id.clone()),
+                note: None,
+            };
+            let g = Grant { req, grant_id: new_id("grant"), granted_by: c.name.clone(), scans_used: 0, expires_unix };
+            st.inner.lock().unwrap().grants.push(g.clone());
+            st.save_grants();
+            st.log("approval", format!("Run {run_id} approved: its next {more} scan{} need no approval", if more == 1 { "" } else { "s" }),
+                   &c.name, Some(&project_id), &[("run_id", run_id), ("grant_id", &g.grant_id)]);
+        }
     }
     st.log("approval", format!("Job {id} approved"), &c.name, Some(&project_id), &[("job_id", &id)]);
     st.emit_job(&job);
@@ -324,8 +356,10 @@ async fn create_grant(State(st): St, h: HeaderMap, body: Bytes) -> ApiResult<Res
     }
     let g = Grant { req, grant_id: new_id("grant"), granted_by: c.name.clone(), scans_used: 0, expires_unix };
     st.inner.lock().unwrap().grants.push(g.clone());
+    st.save_grants();
     let limit = g.req.max_scans.map(|m| format!("up to {m} scans")).unwrap_or_else(|| "scans".into());
-    st.log("approval", format!("Grant: {limit} until {}", g.req.expires_at), &c.name, Some(&g.req.project_id), &[("grant_id", &g.grant_id)]);
+    let how = g.req.note.as_deref().map(|n| format!(" ({n})")).unwrap_or_default();
+    st.log("approval", format!("Grant: {limit} until {}{how}", g.req.expires_at), &c.name, Some(&g.req.project_id), &[("grant_id", &g.grant_id)]);
     st.wake.notify_one();
     Ok((StatusCode::CREATED, Json(g)).into_response())
 }
@@ -341,6 +375,7 @@ async fn revoke_grant(State(st): St, h: HeaderMap, Path(id): Path<String>) -> Ap
     if !removed {
         return Err(ApiError::not_found("grant"));
     }
+    st.save_grants();
     st.log("approval", format!("Grant {id} revoked"), &c.name, None, &[("grant_id", &id)]);
     Ok(StatusCode::NO_CONTENT)
 }

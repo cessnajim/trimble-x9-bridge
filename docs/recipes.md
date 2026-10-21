@@ -109,6 +109,7 @@ arguments = { kind = "full_dome", mode = "STD_L0", color = false, note = "window
 | `instructions` | string | `person` | Required for `person` steps: what to tell the person |
 | `needs` | array of strings | `person` | Fields `advance` must supply |
 | `preview_of` | string | `person` | An earlier step whose scan preview a client should show |
+| `review` | string | `person` | `now` (default) or `final`. `final`: the agent answers the step itself and a person reviews the answer at the run's next `now` person step, with the result. See [One sign-off](#one-sign-off-review--final). Needs a later `now` person step |
 | `propose_from` | string | `person` | An earlier step whose output the bridge proposes as this step's answer: each field in `needs` is taken from that output by name, and the person only confirms. See [Proposals](#proposals-the-agent-answers-a-person-confirms) |
 | `of` | string | `check` | The earlier step whose checks are inspected |
 | `expect` | array of strings | `check` | Names of checks that must be ok |
@@ -399,10 +400,39 @@ Every run counts how often a person did, in `interventions`:
 | `confirmed` | A person accepted a proposal unchanged |
 | `corrected` | A person changed a proposal; each changed field goes in `corrections` as `{step_id, field, proposed, given, delta}` (`delta` = given − proposed, for numbers) |
 | `answered` | A person answered a step that had no proposal |
+| `relayed` | Of `total`, answers the agent relayed from the chat (the step's input has `confirmed_via` starting with "relayed"): the person said it to the agent because their chat app couldn't ask them directly |
 
 An agent completing a step of its own run is not a person intervention; an
 operator or admin advancing it is. Grants given ahead of time are not counted:
-they are how a person stays out of the loop. The field log's last line for a
+they are how a person stays out of the loop, once per visit rather than once
+per job. So that this stays visible, a run lists the grants its scans ran
+under in `authorized_by` (`[{grant_id, granted_by}]`), and the field log's
+last line for the run names them.
+
+#### One sign-off (`review = "final"`)
+
+The target is one intervention per job: the person's sign-off on the result.
+Three things get there:
+
+1. **Permission before the job.** An operator lets agents scan in the project
+   for a few hours (a grant without `run_id`; in the web UI, **Let agents
+   scan here** on the Scans tab). The run's scans then need no approval.
+   Without a grant, **Approve the run** on its first scan
+   (`POST /jobs/{id}/approve` with `{"run": true}`) is one approval that also
+   grants the run its later scans.
+2. **The agent decides its own steps.** A `person` step with
+   `review = "final"` is the agent's: it works out the answer (the window's
+   box on the overview) and advances the step itself. The bridge's own checks
+   stand behind it: the site check rescans a close-up that is short of wall,
+   and the measurement checks fail the run rather than pass a wrong number.
+   A person can still answer the step instead; the web UI offers that, folded
+   away, and does not list the step under "Needs you".
+3. **One review.** The next `now` person step (the sign-off) shows what the
+   agent decided earlier, such as its box on the overview, next to the result
+   and its evidence image.
+
+On a run like this the field log ends with "Run … succeeded after 1 person
+intervention (1 confirmation); scans under a grant from …". The field log's last line for a
 run says it, e.g. "Run … succeeded after 3 person interventions (1 approval, 2
 confirmations)". `corrections` with their `delta` show how far the agent was
 from the person, which tells you where it can stop asking.
@@ -438,7 +468,15 @@ JOB=$(curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8795/v1/runs/$R
 curl -s -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8795/v1/jobs/$JOB/approve
 ```
 
-The run goes back to `running` once the job is queued.
+The run goes back to `running` once the job is queued. To approve the whole
+run at once, send `{"run": true}`: the bridge also creates a grant with the
+run's `run_id` for its later scans (one per later `startScan` step plus each
+`measureOpening` step's `rescans`), valid for 2 hours, and counts it all as
+one approval:
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -d '{"run": true}' http://127.0.0.1:8795/v1/jobs/$JOB/approve
+```
 
 ### Advancing a person step
 

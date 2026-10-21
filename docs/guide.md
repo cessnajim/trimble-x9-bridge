@@ -485,6 +485,11 @@ curl -s -X POST -H "$H" $B/jobs/$JOB/approve
 # 200 {"job_id":"job_…","state":"queued",...}
 ```
 
+- A job from a recipe run (it has `run_id`) can be approved with the run's
+  later scans in one go: send `{"run": true}`. The bridge grants that run the
+  scans it may still start, for 2 hours (see
+  [recipes.md](recipes.md#waiting-for-approval)). The web UI offers **Approve
+  the run** and **Only this scan**.
 - Only `operator` and `admin` can approve (`403 forbidden` otherwise).
 - Only a job in `awaiting_approval` can be approved (`409 conflict`
   otherwise, for example "job is queued, not awaiting approval").
@@ -495,7 +500,11 @@ curl -s -X POST -H "$H" $B/jobs/$JOB/approve
 
 ### Grants: standing approval for an agent
 
-A grant lets an agent's scans queue without asking, within limits.
+A grant lets an agent's scans queue without asking, within limits. In the
+web UI an operator gives one from the Scans tab: **Let agents scan here for 4
+hours (up to 12 scans)** for the chosen project, with **Revoke** beside an
+active one. Given once at setup, it is what lets a recipe run ask a person
+only for the final sign-off.
 
 ```bash
 curl -s -H "$H" -d "{\"project_id\":\"$PROJECT\",\"expires_at\":\"2026-10-20T16:00:00Z\",
@@ -907,7 +916,11 @@ another agent gets `403 forbidden`.
 ## Web UI
 
 The bridge serves a small web app at `/ui/` (and redirects `/` there): the
-same API, for the person in the field on the laptop (a tablet or phone works too). It is built into the
+same API, for the person in the field on the laptop (a tablet or phone works too).
+With an agent, the person doesn't need it: the MCP server asks them for the
+visit's permission and the sign-off in the chat (see the TrimbleX9-mcp README,
+"The person, in the chat"). The web UI is for looking (the 3D viewer, coverage,
+the field log) and for working without an agent. It is built into the
 `x9-bridge` binary, needs no internet, and loads nothing from anywhere else.
 
 ### Reaching it
@@ -943,7 +956,7 @@ stops and deletes.
 | Tab | What you see and do |
 | --- | --- |
 | **Now** | Battery, level, moved-since-last-scan, storage. **Needs you**: scan requests waiting for approval (with mode, project, window and note) and runs waiting for a person. What is running, with phase, progress and Stop. Recent jobs; a cancelled scan links to its partial scan. New full-dome scan. |
-| **Runs** | Start a recipe (project and inputs). Each run's steps, what it waits for, and its problem if it failed. A `person` step shows its instructions and a form for its `needs`; a `box` need shows the `preview_of` step's preview to draw on. When the agent has proposed an answer, the step shows it (the box on the preview, the values in the form, the agent's note) with **Looks right**; drawing a new box or editing a value changes it first. Cancel a run. |
+| **Runs** | Start a recipe (project and inputs). A step the agent decides itself (`review = "final"`) is not listed under "Needs you"; its answer is shown again at the sign-off next to the result, and a person may answer it instead (folded away). A run's page shows its person interventions and the grants its scans ran under. Each run's steps, what it waits for, and its problem if it failed. A `person` step shows its instructions and a form for its `needs`; a `box` need shows the `preview_of` step's preview to draw on. When the agent has proposed an answer, the step shows it (the box on the preview, the values in the form, the agent's note) with **Looks right**; drawing a new box or editing a value changes it first. Cancel a run. |
 | **Scans** | Pick or create a project; scans grouped by station, area scans under their full dome. A scan: its preview, **measure the opening** (values, checks, evidence image), **aim** (draw a box, see the window in degrees, pick a mode, scan the area), **export** PLY or LAS with its checks and a download, download the raw `.tzf`, delete (operator). |
 | **Log** | The field log, newest first, and a note form. |
 | **Viewer** (`#/view/<scan_id>`, from a scan's **View the points** or the Scans tab's **View the latest scan**) | The scan's points in 3D, coloured by intensity, height or coverage (spacing class, with shadows drawn on the floor in red and a legend). **Plan** shows the coverage plan; **No ceiling** (on for full domes) hides the ceiling to see into the room; **From scanner** puts you where the scanner stood to look around; **Overview** goes back. Drag to turn, right-drag or shift-drag to pan, scroll or pinch to zoom. **Follow new scans** (on by default) opens each new scan in the same project as soon as it is done, and a line at the top says what is scanning meanwhile. |
