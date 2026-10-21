@@ -485,6 +485,12 @@ function viewNow() {
 
 const CHECKS = { point_count: "Point count", levelled: "Levelled", coordinates: "Coordinates", intensity: "Intensity" };
 
+function interventionText(iv) {
+  const parts = [[iv.approvals, "approval"], [iv.confirmed, "confirmation"], [iv.corrected, "correction"], [iv.answered, "answer"]]
+    .filter(([n]) => n > 0).map(([n, w]) => `${n} ${w}${n === 1 ? "" : "s"}`);
+  return `${iv.total} person intervention${iv.total === 1 ? "" : "s"}${parts.length ? ` (${parts.join(", ")})` : ""}`;
+}
+
 const recipeTitle = (id) => S.recipes.find((r) => r.recipe_id === id)?.title ?? id;
 
 function viewRuns() {
@@ -586,6 +592,8 @@ function viewRun(id) {
   return `<section><div class="card">
       <div class="line"><h3 class="grow">${esc(recipeTitle(r.recipe_id))}</h3>${stateChip(r.state)}</div>
       <div class="meta">Started by ${esc(r.started_by)} · ${esc(ago(r.created_at))}</div>
+      ${r.interventions ? `<div class="meta">${esc(interventionText(r.interventions))}</div>` : ""}
+      ${(r.interventions?.corrections || []).map((c) => `<div class="note">Corrected “${esc(c.field)}” in step “${esc(c.step_id)}”${c.delta != null ? `: ${c.delta > 0 ? "+" : ""}${esc(c.delta)}` : ""} (proposed ${esc(typeof c.proposed === "object" ? JSON.stringify(c.proposed) : c.proposed)}, given ${esc(typeof c.given === "object" ? JSON.stringify(c.given) : c.given)})</div>`).join("")}
       ${r.problem ? `<div class="problem">${esc(problemText(r.problem))}</div>` : ""}
     </div></section>
     ${panel ? `<section>${panel}</section>` : ""}

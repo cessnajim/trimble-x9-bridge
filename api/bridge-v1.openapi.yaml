@@ -1301,6 +1301,25 @@ components:
         finished_at: { type: [string, "null"], format: date-time }
         problem: { $ref: "#/components/schemas/Problem" }
         current_step_id: { type: [string, "null"] }
+        interventions:
+          type: object
+          description: How often a person stepped in; see recipes.md "Person interventions".
+          properties:
+            total: { type: integer }
+            approvals: { type: integer }
+            confirmed: { type: integer }
+            corrected: { type: integer }
+            answered: { type: integer }
+            corrections:
+              type: array
+              items:
+                type: object
+                properties:
+                  step_id: { type: string }
+                  field: { type: string }
+                  proposed: {}
+                  given: {}
+                  delta: { type: number }
         steps:
           type: array
           items:

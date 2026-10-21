@@ -340,6 +340,9 @@ try:
         s, b = call("POST", f"/runs/{rid}/advance", "operator", {"step_id": "confirm", "input": prop.get("input", {})})
         r = wait_run(rid, lambda r: False, timeout=10)
         check("run finishes when the person hands in the measurement", r["state"] == "succeeded" and r["finished_at"], r)
+        iv = r.get("interventions", {})
+        check("the run counts its person interventions: 1 approval, 2 confirmations, no corrections",
+              iv.get("total") == 3 and iv.get("approvals") == 1 and iv.get("confirmed") == 2 and iv.get("corrected") == 0, iv)
         s, log = call("GET", f"/log?project_id={pid}", "viewer")
         check("run steps are in the field log", any(e["kind"] == "run" and "started" in e["text"] for e in log)
               and any("Waiting for a person" in e["text"] for e in log), [e["text"] for e in log][-6:])

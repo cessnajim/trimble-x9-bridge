@@ -367,6 +367,29 @@ Steps after a failed or cancelled step stay `pending`. `job_id` is set on
 `GET /runs/{id}` returns one. Each change is also sent as a `run` event on
 `GET /events`. Runs are kept in memory only.
 
+### Person interventions
+
+AI-first aims for a person to step in once per run: the final confirmation.
+Every run counts how often a person did, in `interventions`:
+
+```json
+"interventions": {"total": 3, "approvals": 1, "confirmed": 2, "corrected": 0, "answered": 0, "corrections": []}
+```
+
+| Field | Counts |
+| --- | --- |
+| `approvals` | A person approved one of the run's scans |
+| `confirmed` | A person accepted a proposal unchanged |
+| `corrected` | A person changed a proposal; each changed field goes in `corrections` as `{step_id, field, proposed, given, delta}` (`delta` = given − proposed, for numbers) |
+| `answered` | A person answered a step that had no proposal |
+
+An agent completing a step of its own run is not a person intervention; an
+operator or admin advancing it is. Grants given ahead of time are not counted:
+they are how a person stays out of the loop. The field log's last line for a
+run says it, e.g. "Run … succeeded after 3 person interventions (1 approval, 2
+confirmations)". `corrections` with their `delta` show how far the agent was
+from the person, which tells you where it can stop asking.
+
 ### Whose run it is
 
 A run executes **under the role and name of whoever started it**:

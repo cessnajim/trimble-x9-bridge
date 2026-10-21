@@ -296,6 +296,9 @@ async fn approve_job(State(st): St, h: HeaderMap, Path(id): Path<String>) -> Api
         rec.job.state = JobState::Queued;
         (rec.job.clone(), rec.project_id.clone())
     };
+    if let Some(run_id) = &job.run_id {
+        crate::runs::note_approval(&st, run_id);
+    }
     st.log("approval", format!("Job {id} approved"), &c.name, Some(&project_id), &[("job_id", &id)]);
     st.emit_job(&job);
     st.wake.notify_one();
@@ -650,7 +653,9 @@ async fn advance_run(State(st): St, h: HeaderMap, Path(id): Path<String>, body: 
     let c = st.require(&h, |r| r != Role::Viewer, "advance runs")?;
     crate::runs::may_steer(&st, &id, &c, "advance other people's runs")?;
     let a: Advance = parse(&body)?;
-    Ok(Json(crate::runs::advance(&st, &id, &a.step_id, a.input)?))
+    // A person's step: anyone but an agent acting on its own run.
+    let by_person = c.role != Role::Agent;
+    Ok(Json(crate::runs::advance(&st, &id, &a.step_id, a.input, by_person)?))
 }
 
 #[derive(Deserialize)]

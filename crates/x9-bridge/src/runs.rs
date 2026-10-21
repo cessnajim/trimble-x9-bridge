@@ -54,6 +54,49 @@ pub struct Run {
     pub steps: Vec<StepState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub problem: Option<Value>,
+    /// How often a person had to step in. AI-first aims for one: the final
+    /// confirmation.
+    pub interventions: Interventions,
+}
+
+/// A run's person interventions. An agent completing its own run's step is
+/// not one; an operator or admin (or a person-held token) acting on it is.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Interventions {
+    pub total: u32,
+    /// A person approved one of the run's scans.
+    pub approvals: u32,
+    /// A person accepted a proposal unchanged.
+    pub confirmed: u32,
+    /// A person changed a proposal; see `corrections`.
+    pub corrected: u32,
+    /// A person answered a step that had no proposal.
+    pub answered: u32,
+    /// What was changed: `{step_id, field, proposed, given, delta?}`, with
+    /// `delta` = given − proposed for numbers.
+    pub corrections: Vec<Value>,
+}
+
+impl Interventions {
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        for (n, one, many) in [(self.approvals, "approval", "approvals"), (self.confirmed, "confirmation", "confirmations"),
+                               (self.corrected, "correction", "corrections"), (self.answered, "answer", "answers")] {
+            if n > 0 {
+                parts.push(format!("{n} {}", if n == 1 { one } else { many }));
+            }
+        }
+        let what = if parts.is_empty() { String::new() } else { format!(" ({})", parts.join(", ")) };
+        format!("{} person intervention{}{what}", self.total, if self.total == 1 { "" } else { "s" })
+    }
+}
+
+/// Count a person's approval of one of the run's scans.
+pub fn note_approval(st: &AppState, run_id: &str) {
+    with_run(st, run_id, |rec| {
+        rec.run.interventions.approvals += 1;
+        rec.run.interventions.total += 1;
+    });
 }
 
 pub struct RunRecord {
@@ -108,6 +151,7 @@ pub fn start(st: &Arc<AppState>, caller: Caller, recipe: Recipe, project_id: Str
         finished_at: None,
         steps: recipe.steps.iter().map(|s| StepState { step_id: s.step_id.clone(), state: "pending".into(), job_id: None, output: None, proposal: None }).collect(),
         problem: None,
+        interventions: Interventions::default(),
     };
     let ctx = json!({"project_id": project_id, "input": inputs, "steps": {}});
     let name = caller.name.clone();
@@ -153,9 +197,39 @@ fn waiting_step(rec: &RunRecord, step_id: &str, input: &Value) -> Result<usize, 
 
 /// Supply a person step's input. Errors if the run isn't waiting there. When
 /// the step had a proposal, its output records whether it was accepted as is.
-pub fn advance(st: &AppState, run_id: &str, step_id: &str, mut input: Value) -> Result<Run, ApiError> {
+pub fn advance(st: &AppState, run_id: &str, step_id: &str, mut input: Value, by_person: bool) -> Result<Run, ApiError> {
     let res = with_run(st, run_id, |rec| -> Result<(Run, Option<(String, bool)>), ApiError> {
         let i = waiting_step(rec, step_id, &input)?;
+        if by_person {
+            let iv = &mut rec.run.interventions;
+            iv.total += 1;
+            match &rec.run.steps[i].proposal {
+                None => iv.answered += 1,
+                Some(p) => {
+                    let mut changed = Vec::new();
+                    for n in &rec.recipe.steps[i].needs {
+                        let (given, proposed) = (input.get(n.as_str()), p.input.get(n.as_str()));
+                        let same = match (given, proposed) {
+                            (Some(Value::Number(a)), Some(Value::Number(b))) => a.as_f64() == b.as_f64(),
+                            _ => given == proposed,
+                        };
+                        if !same {
+                            let mut c = json!({"step_id": step_id, "field": n, "proposed": proposed, "given": given});
+                            if let (Some(a), Some(b)) = (given.and_then(Value::as_f64), proposed.and_then(Value::as_f64)) {
+                                c["delta"] = json!(((a - b) * 1000.0).round() / 1000.0);
+                            }
+                            changed.push(c);
+                        }
+                    }
+                    if changed.is_empty() {
+                        iv.confirmed += 1;
+                    } else {
+                        iv.corrected += 1;
+                        iv.corrections.extend(changed);
+                    }
+                }
+            }
+        }
         let verdict = rec.run.steps[i].proposal.as_ref().map(|p| {
             // Numbers compare by value (1185 and 1185.0 are the same answer).
             let eq = |a: Option<&Value>, b: Option<&Value>| match (a, b) {
@@ -227,9 +301,10 @@ fn finish(st: &AppState, run_id: &str, state: &str, problem: Option<&ApiError>) 
         }
         rec.run.project_id.clone()
     });
+    let iv = snapshot(st, run_id).map(|r| r.interventions.summary()).unwrap_or_default();
     let text = match (state, problem) {
-        ("failed", Some(p)) => format!("Run {run_id} failed: {}", p.detail.as_deref().unwrap_or(&p.title)),
-        _ => format!("Run {run_id} {state}"),
+        ("failed", Some(p)) => format!("Run {run_id} failed: {} ({iv})", p.detail.as_deref().unwrap_or(&p.title)),
+        _ => format!("Run {run_id} {state} after {iv}"),
     };
     st.log(if state == "failed" { "error" } else { "run" }, text, "bridge", project.as_deref(), &[("run_id", run_id)]);
 }
@@ -429,6 +504,7 @@ mod tests {
             finished_at: None,
             steps: vec![],
             problem: None,
+            interventions: Interventions::default(),
         }
     }
 
@@ -440,5 +516,20 @@ mod tests {
         assert!(!may_steer_run(&r, &who("agent-2", Role::Agent)));
         assert!(may_steer_run(&r, &who("op", Role::Operator)));
         assert!(may_steer_run(&r, &who("root", Role::Admin)));
+    }
+
+    #[test]
+    fn interventions_summary_reads_well() {
+        let mut iv = Interventions::default();
+        assert_eq!(iv.summary(), "0 person interventions");
+        iv.total = 3;
+        iv.approvals = 1;
+        iv.confirmed = 2;
+        assert_eq!(iv.summary(), "3 person interventions (1 approval, 2 confirmations)");
+        iv.total = 1;
+        iv.approvals = 0;
+        iv.confirmed = 0;
+        iv.corrected = 1;
+        assert_eq!(iv.summary(), "1 person intervention (1 correction)");
     }
 }
