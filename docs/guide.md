@@ -719,6 +719,41 @@ cannot read fails the job with `decode_failed`.
 Export metadata lives in memory. After a restart, `GET /exports/{id}` is
 `404` even though the file is still in the data directory.
 
+### Measure an opening
+
+The bridge measures a window's **finished opening** (the hole in the wall
+face) from a levelled close-up that has wall on every side of the window:
+
+```bash
+curl -s -H "$H" -d '{"kind":"opening"}' $B/scans/$SCAN/measurements      # 202, a measure job
+curl -s -H "$H" $B/measurements/$MEASUREMENT                              # values, checks
+curl -s -H "$H" -o evidence.png $B/measurements/$MEASUREMENT/evidence     # check image
+```
+
+How: the wall's direction comes from the largest vertical plane; the wall
+face is the frontmost plane parallel to it with real support (the glass sits
+behind it, a plant in front isn't planar). Its points are laid flat on a 5 mm
+grid; the largest empty region is the opening; width and height are medians
+of wall-to-wall runs along the middle 60 % of rows and columns. Rows blocked
+by something in front of the window (more than 20 mm off the median) are
+counted as obstructed.
+
+| Field | What |
+| --- | --- |
+| `opening_width_mm`, `opening_height_mm` | The result |
+| `uncertainty_mm` | One grid cell (5 mm), or the spread of the unobstructed rows or columns if larger |
+| `values` | The same in metres, with uncertainty and basis |
+| `checks` | `wall_fit` (wall face RMS ≤ 3 mm), `opening_bounded` (wall on both sides in ≥ 60 % of rows and columns), `consistent` (≥ 30 % of them agree with the median to 20 mm) |
+| `details` | Distance, wall fit, points, rows and columns used and clean, spreads |
+| `evidence_url` | The check image: wall grey, opening green, measuring row and column red |
+
+On a real X9 (2026-10-21) it took about 4 s on a Raspberry Pi 4 for a 7.2 M
+point close-up. Repeat runs of the same window agreed to 5 mm. Things to know:
+the opening is measured at the wall face (not the frame or the rough
+opening); it needs wall visible on all four sides; a measurement is kept in
+memory until the bridge restarts, its evidence image on disk; deleting the
+scan deletes its measurements.
+
 ### Download the raw scan file
 
 ```bash
@@ -845,7 +880,7 @@ stops and deletes.
 | --- | --- |
 | **Now** | Battery, level, moved-since-last-scan, storage. **Needs you**: scan requests waiting for approval (with mode, project, window and note) and runs waiting for a person. What is running, with phase, progress and Stop. Recent jobs; a cancelled scan links to its partial scan. New full-dome scan. |
 | **Runs** | Start a recipe (project and inputs). Each run's steps, what it waits for, and its problem if it failed. A `person` step shows its instructions and a form for its `needs`; a `box` need shows the `preview_of` step's preview to draw on. When the agent has proposed an answer, the step shows it (the box on the preview, the values in the form, the agent's note) with **Looks right**; drawing a new box or editing a value changes it first. Cancel a run. |
-| **Scans** | Pick or create a project; scans grouped by station, area scans under their full dome. A scan: its preview, **aim** (draw a box, see the window in degrees, pick a mode, scan the area), **export** PLY or LAS with its checks and a download, download the raw `.tzf`, delete (operator). |
+| **Scans** | Pick or create a project; scans grouped by station, area scans under their full dome. A scan: its preview, **measure the opening** (values, checks, evidence image), **aim** (draw a box, see the window in degrees, pick a mode, scan the area), **export** PLY or LAS with its checks and a download, download the raw `.tzf`, delete (operator). |
 | **Log** | The field log, newest first, and a note form. |
 
 Things to know:

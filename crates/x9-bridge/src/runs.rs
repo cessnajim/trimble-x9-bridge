@@ -5,7 +5,7 @@ use crate::export::ExportRequest;
 use crate::model::{Caller, JobState, ScanRequest};
 use crate::problem::ApiError;
 use crate::recipe::{lookup, resolve, Recipe, RecipeStep};
-use crate::routes::{check_note, compute_aim, submit_export, submit_scan, AimReq};
+use crate::routes::{check_note, compute_aim, submit_export, submit_measure, submit_scan, AimReq, MeasureRequest};
 use crate::state::AppState;
 use crate::util::{new_id, now_rfc3339};
 use axum::http::StatusCode;
@@ -157,7 +157,12 @@ pub fn advance(st: &AppState, run_id: &str, step_id: &str, mut input: Value) -> 
     let res = with_run(st, run_id, |rec| -> Result<(Run, Option<(String, bool)>), ApiError> {
         let i = waiting_step(rec, step_id, &input)?;
         let verdict = rec.run.steps[i].proposal.as_ref().map(|p| {
-            let same = rec.recipe.steps[i].needs.iter().all(|n| input.get(n.as_str()) == p.input.get(n.as_str()));
+            // Numbers compare by value (1185 and 1185.0 are the same answer).
+            let eq = |a: Option<&Value>, b: Option<&Value>| match (a, b) {
+                (Some(Value::Number(x)), Some(Value::Number(y))) => x.as_f64() == y.as_f64(),
+                _ => a == b,
+            };
+            let same = rec.recipe.steps[i].needs.iter().all(|n| eq(input.get(n.as_str()), p.input.get(n.as_str())));
             (p.by.clone(), same)
         });
         if let Some((_, same)) = &verdict {
@@ -286,6 +291,13 @@ async fn action(st: &Arc<AppState>, run_id: &str, i: usize, step: &RecipeStep, c
             let export_id = job.result.as_ref().and_then(|r| r.get("export_id")).and_then(Value::as_str).unwrap_or("").to_string();
             st.inner.lock().unwrap().exports.get(&export_id).cloned().ok_or_else(|| ApiError::not_found("export"))
         }
+        "measureOpening" => {
+            let scan_id = args.get("scan_id").and_then(Value::as_str).ok_or_else(|| ApiError::invalid("measureOpening needs scan_id"))?.to_string();
+            let job = submit_measure(st, caller, scan_id, MeasureRequest { kind: "opening".into() }, Some(run_id)).await?;
+            let job = wait_job(st, run_id, i, &job.job_id).await?;
+            let id = job.result.as_ref().and_then(|r| r.get("measurement_id")).and_then(Value::as_str).unwrap_or("").to_string();
+            st.inner.lock().unwrap().measurements.get(&id).cloned().ok_or_else(|| ApiError::not_found("measurement"))
+        }
         "aimFromPreview" => {
             let req: AimReq = serde_json::from_value(args).map_err(bad)?;
             compute_aim(st, req).await
@@ -345,6 +357,23 @@ async fn person(st: &AppState, run_id: &str, i: usize, step: &RecipeStep) -> Res
     .ok_or_else(cancelled)?;
     let project = snapshot(st, run_id).map(|r| r.project_id).unwrap_or_default();
     st.log("run", format!("Waiting for a person: {}", step.instructions.as_deref().unwrap_or("")), "bridge", Some(&project), &[("run_id", run_id), ("step_id", &step.step_id)]);
+    if let Some(from) = &step.propose_from {
+        // Fill the step's needs from the earlier step's output, by name.
+        let source = with_run(st, run_id, |rec| rec.ctx["steps"][from.as_str()].clone()).unwrap_or(Value::Null);
+        let mut input = serde_json::Map::new();
+        for n in &step.needs {
+            if let Some(v) = source.get(n.as_str()) {
+                input.insert(n.clone(), v.clone());
+            }
+        }
+        if input.len() == step.needs.len() {
+            let note = match (source.get("opening_width_mm"), source.get("opening_height_mm")) {
+                (Some(w), Some(h)) => Some(format!("Measured by the bridge from step {from:?}: {w} × {h} mm (± {} mm)", source.get("uncertainty_mm").cloned().unwrap_or(Value::Null))),
+                _ => Some(format!("Taken from step {from:?}")),
+            };
+            let _ = propose(st, run_id, &step.step_id, Value::Object(input), note, "bridge");
+        }
+    }
     loop {
         wake.notified().await;
         let got = with_run(st, run_id, |rec| {

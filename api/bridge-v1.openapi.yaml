@@ -458,14 +458,16 @@ paths:
         default: { $ref: "#/components/responses/Problem" }
 
   /scans/{scan_id}/measurements:
-    x-status: planned
     parameters: [{ $ref: "#/components/parameters/ScanId" }]
     post:
       tags: [products]
       operationId: measure
-      x-status: planned
-      summary: Measure a feature in a scan (runs in the measurement worker).
-      description: Planned; not implemented. The measurement worker is not built yet.
+      summary: Measure a feature in a scan (a `measure` job).
+      description: |
+        `kind: opening` measures a window's finished opening (the hole in the
+        wall face) from a levelled close-up with wall on every side. Any role
+        but `viewer`. The job's phases are `downloading` and `measuring`; its
+        result is `{measurement_id}`.
       requestBody:
         required: true
         content:
@@ -473,39 +475,36 @@ paths:
             schema: { $ref: "#/components/schemas/MeasurementRequest" }
       responses:
         "202":
-          description: Queued; the job's result is a `Measurement`.
+          description: Started.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
         default: { $ref: "#/components/responses/Problem" }
 
   /measurements/{measurement_id}:
-    x-status: planned
     parameters:
       - { name: measurement_id, in: path, required: true, schema: { type: string } }
     get:
       tags: [products]
       operationId: getMeasurement
-      x-status: planned
-      description: Planned; not implemented.
       responses:
         "200":
-          description: Values, uncertainties, checks and the evidence image.
+          description: Values, uncertainties, checks and the evidence image's URL.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Measurement" }
         default: { $ref: "#/components/responses/Problem" }
 
   /measurements/{measurement_id}/evidence:
-    x-status: planned
     parameters:
       - { name: measurement_id, in: path, required: true, schema: { type: string } }
     get:
       tags: [products]
       operationId: getMeasurementEvidence
-      x-status: planned
-      summary: The annotated check image for a person or a vision model to verify.
-      description: Planned; not implemented.
+      summary: The check image for a person or a vision model to verify.
+      description: |
+        The wall-face raster, upright: wall grey, the opening green, the
+        measuring row and column red. Only the wall plane; no room image.
       responses:
         "200":
           description: PNG.
@@ -1072,7 +1071,6 @@ components:
       properties: { export_id: { type: string } }
     MeasurementRef:
       type: object
-      x-status: planned
       required: [measurement_id]
       properties: { measurement_id: { type: string } }
 
@@ -1155,7 +1153,6 @@ components:
 
     MeasurementRequest:
       type: object
-      x-status: planned
       required: [kind]
       properties:
         kind:
@@ -1164,7 +1161,8 @@ components:
           description: v1 measures one thing well; more kinds come later.
         hint_box:
           type: object
-          description: Optional preview box around the feature (same form as `AimRequest.box`).
+          x-status: planned
+          description: Planned; ignored today. Optional preview box around the feature (same form as `AimRequest.box`).
           properties:
             x0: { type: integer }
             y0: { type: integer }
@@ -1172,7 +1170,8 @@ components:
             y1: { type: integer }
         avoid:
           type: array
-          description: Preview boxes to ignore (a plant, a person).
+          x-status: planned
+          description: Planned; ignored today. Preview boxes to ignore (a plant, a person).
           items:
             type: object
             properties:
@@ -1183,30 +1182,37 @@ components:
 
     Measurement:
       type: object
-      x-status: planned
       required: [measurement_id, scan_id, kind, values, checks, evidence_url]
       properties:
         measurement_id: { type: string }
         scan_id: { type: string }
-        kind: { type: string }
+        kind: { type: string, enum: [opening] }
         values:
           type: array
           items:
             type: object
             required: [name, value_m, uncertainty_m]
             properties:
-              name:
-                type: string
-                examples: [opening_width, opening_height, frame_depth, glass_width_left]
+              name: { type: string, examples: [opening_width, opening_height] }
               value_m: { type: number }
-              uncertainty_m: { type: number }
+              uncertainty_m:
+                type: number
+                description: One grid cell (5 mm), or the spread of the unobstructed rows (columns) if larger.
               basis: { type: string, description: How it was measured, in one line. }
         checks:
           type: array
+          description: "`wall_fit` (wall face RMS ≤ 3 mm), `opening_bounded` (wall on both sides in ≥ 60 % of rows and columns), `consistent` (≥ 30 % of rows and columns within 20 mm of the median)."
           items: { $ref: "#/components/schemas/Check" }
+        opening_width_mm: { type: integer }
+        opening_height_mm: { type: integer }
+        uncertainty_mm: { type: integer }
+        details:
+          type: object
+          description: Distance, wall fit, points used, rows and columns used and clean, spreads, grid cell, wall normal.
+          additionalProperties: true
         evidence_url:
           type: string
-          description: Relative URL of the annotated check image.
+          description: The evidence image, e.g. `/v1/measurements/{id}/evidence`.
 
     RecipeSummary:
       type: object
@@ -1321,7 +1327,7 @@ components:
       properties:
         entry_id: { type: string }
         at: { type: string, format: date-time }
-        kind: { type: string, enum: [note, scan, export, run, check, approval, rule, error] }
+        kind: { type: string, enum: [note, scan, export, measure, run, check, approval, rule, error] }
         text: { type: string }
         author: { type: string, description: Token name, or "bridge". }
         project_id: { type: [string, "null"] }

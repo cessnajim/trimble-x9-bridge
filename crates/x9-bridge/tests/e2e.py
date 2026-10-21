@@ -320,15 +320,24 @@ try:
         check("agent proposes the box; the step keeps waiting with the proposal", s == 200 and prop.get("input", {}).get("box") == box
               and prop.get("by") == b["started_by"] and b["waiting_for"] == "input", b)
         s, b = call("POST", f"/runs/{rid}/advance", "operator", {"step_id": "box", "input": {"box": box}})
-        r = wait_run(rid, lambda r: r["current_step_id"] == "measure" and r["waiting_for"] == "input", timeout=240)
+        r = wait_run(rid, lambda r: r["current_step_id"] == "confirm" and r["waiting_for"] == "input", timeout=300)
         steps = {x["step_id"]: x for x in r["steps"]}
         check("run aims, scans the close-up under its grant, exports and passes checks",
-              r["current_step_id"] == "measure" and all(steps[k]["state"] == "done" for k in ("aim", "closeup", "export", "checks"))
+              r["current_step_id"] == "confirm" and all(steps[k]["state"] == "done" for k in ("aim", "closeup", "export", "checks"))
               and steps["export"]["output"]["point_count"] == 777580, {k: v["state"] for k, v in steps.items()} if r else r)
         check("the person's confirmation is recorded as accepting the proposal", steps["box"]["output"].get("proposal_accepted") is True, steps["box"])
         _, cj = call("GET", f"/jobs/{steps['closeup']['job_id']}", "viewer")
         check("close-up job carries the run id and ran without approval", cj.get("run_id") == rid and cj["state"] == "succeeded", cj)
-        s, b = call("POST", f"/runs/{rid}/advance", "agent", {"step_id": "measure", "input": {"notes": "opening 1196 x 1168 mm"}})
+        m = steps["measure"]["output"]
+        check("the run measures the opening: about 1185 x 1150 mm, with checks and evidence",
+              steps["measure"]["state"] == "done" and abs(m["opening_width_mm"] - 1185) <= 10 and abs(m["opening_height_mm"] - 1150) <= 10
+              and steps["measure_checks"]["state"] == "done" and m["evidence_url"].endswith("/evidence"), m)
+        s, _, png = fetch(m["evidence_url"].removeprefix("/v1"), "viewer")
+        check("the evidence image is a PNG", s == 200 and png[:4] == b"\x89PNG", s)
+        prop = {x["step_id"]: x for x in r["steps"]}["confirm"].get("proposal", {})
+        check("the bridge proposes the measurement for a person to confirm", prop.get("by") == "bridge"
+              and prop.get("input") == {"opening_width_mm": m["opening_width_mm"], "opening_height_mm": m["opening_height_mm"]}, prop)
+        s, b = call("POST", f"/runs/{rid}/advance", "operator", {"step_id": "confirm", "input": prop.get("input", {})})
         r = wait_run(rid, lambda r: False, timeout=10)
         check("run finishes when the person hands in the measurement", r["state"] == "succeeded" and r["finished_at"], r)
         s, log = call("GET", f"/log?project_id={pid}", "viewer")

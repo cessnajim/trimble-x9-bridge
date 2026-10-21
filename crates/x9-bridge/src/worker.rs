@@ -497,6 +497,75 @@ pub fn echo_mismatch(sent: &serde_json::Value, echo: &serde_json::Value) -> Vec<
     out
 }
 
+/// Measure a scan (blocking work off the runtime): download its file, decode
+/// levelled points, find the opening, store the measurement and evidence.
+pub async fn run_measure(st: Arc<AppState>, job_id: String, scan_id: String) {
+    use crate::files::{scan_file, FileKind};
+    let cancelled = |st: &AppState| finish(st, &job_id, JobState::Cancelled, None, None);
+    let tzf = match unless_cancelled(&st, &job_id, scan_file(&st, &scan_id, FileKind::Tzf)).await {
+        None => return cancelled(&st),
+        Some(Ok(p)) => p,
+        Some(Err(e)) => return finish(&st, &job_id, JobState::Failed, None, Some(&e)),
+    };
+    if update(&st, &job_id, |r| r.job.phase = Some("measuring".into())) {
+        return cancelled(&st);
+    }
+    let (st2, job2) = (st.clone(), job_id.clone());
+    let res = tokio::task::spawn_blocking(move || -> Result<(serde_json::Value, Vec<u8>), String> {
+        let t = trimble_tzf::Tzf::open(&tzf).map_err(|e| format!("open: {e}"))?;
+        let pts = t.grid_points().map_err(|e| format!("decode: {e}"))?;
+        if cancel_requested(&st2, &job2) {
+            return Err("cancelled".into());
+        }
+        let xyz: Vec<[f64; 3]> = pts.iter().map(|p| [p.point.x as f64, p.point.y as f64, p.point.z as f64]).collect();
+        drop(pts);
+        let o = crate::measure::opening(&xyz)?;
+        Ok(crate::measure::report(&o))
+    })
+    .await;
+    if cancel_requested(&st, &job_id) {
+        return cancelled(&st);
+    }
+    match res {
+        Ok(Ok((mut v, png))) => {
+            let id = crate::util::new_id("msr");
+            let path = st.data_dir.join("measurements").join(format!("{id}.png"));
+            if let Some(dir) = path.parent() {
+                if let Err(e) = tokio::fs::create_dir_all(dir).await {
+                    return finish(&st, &job_id, JobState::Failed, None, Some(&ApiError::cache(format!("measurements directory: {e}"))));
+                }
+            }
+            if let Err(e) = tokio::fs::write(&path, &png).await {
+                return finish(&st, &job_id, JobState::Failed, None, Some(&ApiError::cache(format!("evidence image: {e}"))));
+            }
+            v["measurement_id"] = serde_json::json!(id);
+            v["scan_id"] = serde_json::json!(scan_id);
+            v["evidence_url"] = serde_json::json!(format!("/v1/measurements/{id}/evidence"));
+            let failed: Vec<String> = v["checks"]
+                .as_array()
+                .map(|cs| cs.iter().filter(|c| c["ok"] == false).filter_map(|c| c["name"].as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            let project_id = {
+                let mut inner = st.inner.lock().unwrap();
+                inner.measurements.insert(id.clone(), v.clone());
+                inner.measurement_files.insert(id.clone(), path);
+                inner.jobs.iter().find(|j| j.job.job_id == job_id).map(|j| j.project_id.clone())
+            };
+            let text = format!("Opening {} × {} mm (± {} mm) in scan {scan_id}", v["opening_width_mm"], v["opening_height_mm"], v["uncertainty_mm"]);
+            st.log("measure", text, "bridge", project_id.as_deref(), &[("measurement_id", &id), ("scan_id", &scan_id)]);
+            if !failed.is_empty() {
+                st.log("check", format!("Measurement {id}: checks failed: {}", failed.join(", ")), "bridge", project_id.as_deref(), &[("measurement_id", &id)]);
+            }
+            finish(&st, &job_id, JobState::Succeeded, Some(serde_json::json!({"measurement_id": id})), None);
+        }
+        Ok(Err(e)) => {
+            let p = ApiError::new(axum::http::StatusCode::UNPROCESSABLE_ENTITY, "measure_failed", "Could not measure the opening").detail(e);
+            finish(&st, &job_id, JobState::Failed, None, Some(&p));
+        }
+        Err(e) => finish(&st, &job_id, JobState::Failed, None, Some(&ApiError::conflict(e.to_string()))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{busy, echo_mismatch, Busy};

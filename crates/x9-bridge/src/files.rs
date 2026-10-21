@@ -38,7 +38,7 @@ fn cache_path(data_dir: &Path, id: &str, kind: FileKind) -> PathBuf {
     data_dir.join("scans").join(format!("{id}.{}", kind.ext()))
 }
 
-/// Remove a scan's cached file and preview, and any export made from it.
+/// Remove a scan's cached file and preview, and any export or measurement made from it.
 /// Missing files are fine.
 pub async fn evict(st: &AppState, scan_id: &str) {
     let Ok(id) = safe_id(scan_id) else { return };
@@ -55,6 +55,19 @@ pub async fn evict(st: &AppState, scan_id: &str) {
             })
             .collect()
     };
+    let evidence: Vec<PathBuf> = {
+        let mut inner = st.inner.lock().unwrap();
+        let ids: Vec<String> = inner.measurements.iter().filter(|(_, v)| v["scan_id"] == id).map(|(k, _)| k.clone()).collect();
+        ids.iter()
+            .filter_map(|m| {
+                inner.measurements.remove(m);
+                inner.measurement_files.remove(m)
+            })
+            .collect()
+    };
+    for p in evidence {
+        let _ = tokio::fs::remove_file(p).await;
+    }
     for p in exports {
         let _ = tokio::fs::remove_file(p).await;
     }

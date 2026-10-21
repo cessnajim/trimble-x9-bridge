@@ -11,6 +11,7 @@ const PHASES = {
   downloading: "Downloading from the scanner",
   decoding: "Decoding points",
   writing: "Writing the file",
+  measuring: "Measuring the opening",
 };
 
 // ---------------------------------------------------------------- storage ---
@@ -44,6 +45,9 @@ const S = {
   boxShown: {},    // picker key -> which box was last scrolled into view
   aim: {},         // scan_id -> aim result
   exports: {},     // export_id -> export record
+  measurements: {}, // measurement_id -> measurement record
+  evidence: new Map(), // measurement_id -> object URL | "loading" | {error}
+  watchMeasure: {}, // scan_id -> job_id
   watchExport: {}, // scan_id -> job_id
   sheet: null,
   toast: null,
@@ -88,6 +92,7 @@ function stateChip(state) {
 }
 
 function describeJob(j) {
+  if (j.kind === "measure") return "Opening measurement";
   if (j.kind === "export") return `Export${j.result?.export_id && S.exports[j.result.export_id] ? " " + S.exports[j.result.export_id].format?.toUpperCase() : ""}`;
   const r = j.request;
   if (!r) return "Scan";
@@ -216,6 +221,36 @@ function preview(scanId) {
   return "loading";
 }
 
+async function loadMeasurement(id) {
+  try { S.measurements[id] = await api(`/measurements/${encodeURIComponent(id)}`); } catch (e) { S.measurements[id] = { error: e.message }; }
+  render();
+}
+
+function evidence(id) {
+  const p = S.evidence.get(id);
+  if (p) return p;
+  S.evidence.set(id, "loading");
+  api(`/measurements/${encodeURIComponent(id)}/evidence`, { raw: true })
+    .then((r) => r.blob())
+    .then((b) => S.evidence.set(id, URL.createObjectURL(b)))
+    .catch((e) => S.evidence.set(id, { error: e.message }))
+    .finally(() => render());
+  return "loading";
+}
+
+// A measurement's values, checks and evidence image.
+function measurementCard(m) {
+  if (!m || m.error) return m?.error ? `<div class="problem">${esc(m.error)}</div>` : "";
+  const ev = evidence(m.measurement_id);
+  const img = ev === "loading" ? `<div class="placeholder small">Loading the evidence image…</div>` : ev?.error ? `<div class="problem">${esc(ev.error)}</div>` : `<img class="evidence" src="${esc(ev)}" alt="Wall face (grey), opening (green), measuring row and column (red)">`;
+  return `<div class="measure"><div class="big">${esc(m.opening_width_mm)} × ${esc(m.opening_height_mm)} mm</div>
+    <div class="meta">width × height, ± ${esc(m.uncertainty_mm)} mm · ${esc(m.details?.distance_m)} m from the scanner</div>
+    ${img}<p class="hint">Grey: the wall face. Green: the opening. Red: where it was measured. The green should fill the window up to the wall.</p>
+    <ul class="steps">${(m.checks || []).map((c) => `<li><span class="dot ${c.ok ? "done" : "failed"}">${c.ok ? "✓" : "×"}</span><div class="grow"><strong>${esc(MCHECKS[c.name] ?? c.name)}</strong><div class="meta">${esc(c.detail ?? "")}</div></div></li>`).join("")}</ul></div>`;
+}
+const MCHECKS = { wall_fit: "Wall face fit", opening_bounded: "Wall on every side", consistent: "Rows agree" };
+const FIELD = (n) => ({ opening_width_mm: "Opening width (mm)", opening_height_mm: "Opening height (mm)" })[n] ?? n;
+
 async function loadExport(id) {
   try { S.exports[id] = await api(`/exports/${encodeURIComponent(id)}`); } catch (e) { S.exports[id] = { error: e.message }; }
   render();
@@ -250,6 +285,7 @@ function onEvent(chunk) {
     upsert(S.jobs, v, "job_id");
     S.jobs.sort(byNewest);
     if (v.kind === "export" && v.state === "succeeded" && v.result?.export_id && !S.exports[v.result.export_id]) loadExport(v.result.export_id);
+    if (v.kind === "measure" && v.state === "succeeded" && v.result?.measurement_id && !S.measurements[v.result.measurement_id]) loadMeasurement(v.result.measurement_id);
     if (v.kind === "scan" && v.state === "succeeded") { load("projects"); load("scans"); load("status"); }
   } else if (kind === "run") {
     upsert(S.runs, v, "run_id");
@@ -474,6 +510,10 @@ function stepDot(state, i) {
 function stepOutput(rs, def) {
   const o = rs.output;
   if (!o) return "";
+  if (o.measurement_id) {
+    if (!S.measurements[o.measurement_id]) S.measurements[o.measurement_id] = o;
+    return `${esc(o.opening_width_mm)} × ${esc(o.opening_height_mm)} mm (± ${esc(o.uncertainty_mm)} mm)`;
+  }
   if (o.export_id) {
     const ex = S.exports[o.export_id];
     if (!ex) loadExport(o.export_id);
@@ -516,13 +556,15 @@ function viewRun(id) {
       if (S.drawMode[key] === undefined) S.drawMode[key] = false;
     }
     const val = (n) => (prop?.input?.[n] == null ? "" : typeof prop.input[n] === "object" ? JSON.stringify(prop.input[n]) : String(prop.input[n]));
-    const fields = needs.filter((n) => n !== "box").map((n) => `<label class="field"><span>${esc(n)}</span>${String(val(n)).length > 40 ? `<textarea name="${esc(n)}">${esc(val(n))}</textarea>` : `<input type="text" name="${esc(n)}" value="${esc(val(n))}" autocomplete="off">`}</label>`).join("");
+    const src = d.propose_from ? r.steps.find((x) => x.step_id === d.propose_from)?.output : null;
+    const fields = needs.filter((n) => n !== "box").map((n) => `<label class="field"><span>${esc(FIELD(n))}</span>${String(val(n)).length > 40 ? `<textarea name="${esc(n)}">${esc(val(n))}</textarea>` : `<input type="text" name="${esc(n)}" value="${esc(val(n))}" autocomplete="off">`}</label>`).join("");
     const changed = prop && (S.userDrew[key] || false);
     panel = `<div class="card attn"><h3>${esc(prop ? `Check ${prop.by}'s answer` : d.title ?? cur.step_id)}</h3>
       ${prop ? `<div class="note">${esc(prop.by)} proposed this ${esc(ago(prop.at))}${prop.note ? `: “${esc(prop.note)}”` : "."} Confirm it, or adjust it first.</div>
         <p class="hint">The step asks: ${esc(d.instructions ?? "")}</p>`
         : `<p>${esc(d.instructions ?? "This step needs your input.")}</p><p class="hint">Waiting for the agent to propose an answer. You can also give it yourself.</p>`}
       ${needs.includes("box") ? (previewScan ? picker(key, previewScan) : `<div class="problem">No preview to draw on.</div>`) : ""}
+      ${src?.measurement_id ? measurementCard(src) : ""}
       ${mayAdvance(r) ? `<form data-form="advance" data-run="${esc(r.run_id)}" data-step="${esc(cur.step_id)}" data-key="${esc(key)}">${fields}
         <button class="btn ${prop && !changed ? "good" : "primary"} wide" ${S.busy || (needs.includes("box") && !S.boxes[key]) ? "disabled" : ""}>${prop ? (changed ? "Continue with my box" : "Looks right") : "Continue"}</button></form>`
         : `<p class="hint">Only ${esc(r.started_by)} or an operator can continue this run.</p>`}</div>`;
@@ -629,6 +671,17 @@ function viewScan(id) {
       ${aim ? `<div class="facts"><div class="fact"><b>Across</b><span>${deg(aim.window.delta_ha)}</span></div><div class="fact"><b>Up and down</b><span>${deg(aim.window.delta_va)}</span></div></div>
         <label class="field"><span>Scan mode</span><select name="mode" data-change="mode">${modeOpts}</select></label>
         <button class="btn primary wide" data-act="scan-area" data-id="${esc(id)}" ${S.busy ? "disabled" : ""}>Scan this area</button>` : ""}
+    </section>
+    <h2>Measure</h2>
+    <section class="card">
+      ${(() => {
+        const jid = S.watchMeasure[id];
+        const mj = jid ? S.jobs.find((j) => j.job_id === jid) : null;
+        const mid = mj?.result?.measurement_id;
+        if (mid && !S.measurements[mid]) loadMeasurement(mid);
+        return (mj && mj.state !== "succeeded" ? jobCard(mj) : "") + (mid ? measurementCard(S.measurements[mid]) : `<p class="hint">Measures a window's finished opening from a close-up with wall on every side.</p>`);
+      })()}
+      ${canAct() ? `<div class="btns"><button class="btn" data-act="measure" data-id="${esc(id)}" ${S.busy ? "disabled" : ""}>Measure the opening</button></div>` : ""}
     </section>
     <h2>Points</h2>
     <section class="card">
@@ -868,6 +921,11 @@ const actions = {
     const j = await api(`/scans/${encodeURIComponent(el.dataset.id)}/exports`, { method: "POST", body: { format: el.dataset.format, intensity: "auto" } });
     upsert(S.jobs, j, "job_id");
     S.watchExport[el.dataset.id] = j.job_id;
+  }),
+  measure: (el) => act(async () => {
+    const j = await api(`/scans/${encodeURIComponent(el.dataset.id)}/measurements`, { method: "POST", body: { kind: "opening" } });
+    upsert(S.jobs, j, "job_id");
+    S.watchMeasure[el.dataset.id] = j.job_id;
   }),
   "dl-export": (el, e) => { e.preventDefault(); return act(() => download(`/exports/${encodeURIComponent(el.dataset.id)}/file`, `${el.dataset.id}`)); },
   "dl-tzf": (el) => act(() => download(`/scans/${encodeURIComponent(el.dataset.id)}/tzf`, `${el.dataset.id}.tzf`)),

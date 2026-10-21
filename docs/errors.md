@@ -65,11 +65,12 @@ empty body, not a problem document.
 | [`storage_low`](#storage_low) | 409 | Not enough space on the scanner |
 | [`instrument_moved`](#instrument_moved) | 409 | The scanner moved since its last scan |
 | [`decode_failed`](#decode_failed) | 422 | Could not read the reference scan / Could not decode the scan |
+| [`measure_failed`](#measure_failed) | 422 | Could not measure the opening |
 | [`check_failed`](#check_failed) | 409 | A recipe check failed |
 
 The spec also lists `needs_approval` and `worker_unavailable`. The bridge
 never returns them in this version: a scan that needs approval is accepted as
-`awaiting_approval` instead, and the measurement worker does not exist yet.
+`awaiting_approval` instead, and measurements run in the bridge itself.
 A run that is cancelled ends with state `cancelled` and no problem.
 
 ### `unauthorized`
@@ -271,6 +272,14 @@ no longer match. Only checked when `refuse_aim_after_move` is on (the default)
 and the scanner answers.
 
 Hint: "Take a new overview scan at this station and aim from its preview."
+
+### `measure_failed`
+
+**422.** A `measure` job could not find what it measures. Carried by the job's
+`problem`. The `detail` says why, for example "the opening runs off the scan:
+aim the close-up with wall on every side", "too few points on the wall face",
+or "only N points beyond 0.3 m; is this a close-up of a wall?". Rescan with
+the wall visible on all four sides of the window.
 
 ### `decode_failed`
 

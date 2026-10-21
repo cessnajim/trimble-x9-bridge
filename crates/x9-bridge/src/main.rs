@@ -16,6 +16,7 @@ mod aim;
 mod export;
 mod files;
 mod map;
+mod measure;
 mod model;
 mod problem;
 mod recipe;

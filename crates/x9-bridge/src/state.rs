@@ -47,6 +47,9 @@ pub struct Inner {
     pub scan_meta: HashMap<String, ScanMeta>,
     pub exports: HashMap<String, Value>,
     pub export_files: HashMap<String, std::path::PathBuf>,
+    pub measurements: HashMap<String, Value>,
+    /// Evidence images, by measurement id.
+    pub measurement_files: HashMap<String, std::path::PathBuf>,
     pub runs: HashMap<String, crate::runs::RunRecord>,
     /// Scanner tasks the bridge cancelled that may still be listed in `/tasks`.
     pub cancelled_tasks: HashSet<i64>,

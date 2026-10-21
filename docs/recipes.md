@@ -109,6 +109,7 @@ arguments = { kind = "full_dome", mode = "STD_L0", color = false, note = "window
 | `instructions` | string | `person` | Required for `person` steps: what to tell the person |
 | `needs` | array of strings | `person` | Fields `advance` must supply |
 | `preview_of` | string | `person` | An earlier step whose scan preview a client should show |
+| `propose_from` | string | `person` | An earlier step whose output the bridge proposes as this step's answer: each field in `needs` is taken from that output by name, and the person only confirms. See [Proposals](#proposals-the-agent-answers-a-person-confirms) |
 | `of` | string | `check` | The earlier step whose checks are inspected |
 | `expect` | array of strings | `check` | Names of checks that must be ok |
 
@@ -188,6 +189,22 @@ Starts an export and waits until its job ends.
 Output: the whole `Export` object, as from `GET /exports/{id}`:
 `export_id`, `scan_id`, `format`, `point_count`, `bytes`, `bounds_m` and
 `checks`. A `check` step can then inspect `checks`.
+
+### `measureOpening`
+
+Measures a window's finished opening in a scan (a `measure` job, see the
+guide's [Measure an opening](guide.md#measure-an-opening)) and waits until
+it ends.
+
+| Argument | What |
+| --- | --- |
+| `scan_id` | The close-up to measure (required) |
+
+Output: the whole `Measurement`: `measurement_id`, `opening_width_mm`,
+`opening_height_mm`, `uncertainty_mm`, `values`, `checks`, `details` and
+`evidence_url`. A `check` step can inspect `checks` (`wall_fit`,
+`opening_bounded`, `consistent`), and a person step can take its numbers
+with `propose_from`.
 
 ### `addLogNote`
 
@@ -432,6 +449,9 @@ curl -s -H "Authorization: Bearer $TOKEN" \
   `needs`, and the field log says which.
 - Another agent gets `403 forbidden`; a step that isn't waiting is
   `409 conflict`.
+- A `person` step with `propose_from` gets a proposal from the bridge itself
+  (`by: "bridge"`) as soon as it is reached, when that step's output has every
+  field in `needs`; numbers compare by value when deciding `proposal_accepted`.
 
 ### Cancelling a run
 

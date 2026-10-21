@@ -16,4 +16,6 @@ uuid = { version = "1", features = ["v4"] }
 anyhow = { workspace = true }
 trimble-tzf = { git = "https://github.com/northidaholabs/trimble-tzf", rev = "2bd38dd" }
 zune-jpeg = "0.5"
+miniz_oxide = "0.9"
+crc32fast = "1"
 toml = "0.8"

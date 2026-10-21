@@ -2,8 +2,8 @@
 
 id = "window-measurement"
 title = "Measure a window"
-version = "0.1.0"
-summary = "Overview scan, an aimed close-up of the window, a checked point export, then measuring."
+version = "0.2.0"
+summary = "Overview scan, an aimed close-up of the window, a checked point export, then the bridge measures the opening and a person confirms it."
 
 [[inputs]]
 name = "purpose"
@@ -56,7 +56,22 @@ expect = ["point_count", "levelled", "coordinates"]
 
 [[steps]]
 id = "measure"
-title = "Measure and report"
+title = "Measure the opening"
+kind = "action"
+operation = "measureOpening"
+arguments = { scan_id = "{{steps.closeup.scan_id}}" }
+
+[[steps]]
+id = "measure_checks"
+title = "Check the measurement"
+kind = "check"
+of = "measure"
+expect = ["wall_fit", "opening_bounded"]
+
+[[steps]]
+id = "confirm"
+title = "Confirm the opening"
 kind = "person"
-instructions = "Measure the opening from the export and attach the check image (the measurement worker isn't built yet). Report each value with its uncertainty."
-needs = ["notes"]
+instructions = "Check the opening against the evidence image: the green area should fill the window up to the wall face. Confirm the size, or correct it."
+needs = ["opening_width_mm", "opening_height_mm"]
+propose_from = "measure"

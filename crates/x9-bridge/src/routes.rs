@@ -48,6 +48,9 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/v1/scans/:scan_id/exports", post(start_export))
         .route("/v1/exports/:export_id", get(get_export))
         .route("/v1/exports/:export_id/file", get(get_export_file))
+        .route("/v1/scans/:scan_id/measurements", post(start_measurement))
+        .route("/v1/measurements/:measurement_id", get(get_measurement))
+        .route("/v1/measurements/:measurement_id/evidence", get(get_measurement_evidence))
         .route("/v1/aim", post(aim_from_preview))
         .route("/v1/recipes", get(list_recipes))
         .route("/v1/recipes/:recipe_id", get(get_recipe))
@@ -507,6 +510,71 @@ pub async fn submit_export(st: &Arc<AppState>, c: &crate::model::Caller, scan_id
     st.emit_job(&job);
     tokio::spawn(crate::worker::run_export(st.clone(), job.job_id.clone(), scan_id, req));
     Ok(job)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MeasureRequest {
+    pub kind: String,
+}
+
+async fn start_measurement(State(st): St, h: HeaderMap, Path(scan_id): Path<String>, body: Bytes) -> ApiResult<Response> {
+    let c = st.require(&h, |r| r != Role::Viewer, "measure scans")?;
+    let req: MeasureRequest = parse(&body)?;
+    let job = submit_measure(&st, &c, scan_id, req, None).await?;
+    Ok((StatusCode::ACCEPTED, Json(job)).into_response())
+}
+
+/// Start a measurement under the caller's role (shared by direct requests and runs).
+pub async fn submit_measure(st: &Arc<AppState>, c: &crate::model::Caller, scan_id: String, req: MeasureRequest, run_id: Option<&str>) -> ApiResult<Job> {
+    if req.kind != "opening" {
+        return Err(ApiError::invalid(format!("unknown measurement kind {:?}; this bridge measures: opening", req.kind)));
+    }
+    let scan = all_scans(st).await?.into_iter().find(|s| s["scan_id"] == scan_id.as_str()).ok_or_else(|| ApiError::not_found("scan"))?;
+    let project_id = scan["project_id"].as_str().unwrap_or("").to_string();
+    let now = now_rfc3339();
+    let job = Job {
+        job_id: new_id("job"),
+        kind: "measure".into(),
+        state: JobState::Running,
+        phase: Some("downloading".into()),
+        progress: None,
+        requested_by: c.name.clone(),
+        run_id: run_id.map(str::to_string),
+        created_at: now.clone(),
+        started_at: Some(now),
+        finished_at: None,
+        result: None,
+        problem: None,
+        partial_scan_id: None,
+        request: None,
+        project_name: None,
+    };
+    st.inner.lock().unwrap().jobs.push(JobRecord {
+        job: job.clone(),
+        request: None,
+        project_id: project_id.clone(),
+        project_name: String::new(),
+        scanner_task_id: None,
+        cancel_requested: false,
+        grant_id: None,
+    });
+    st.log("measure", format!("Opening measurement of scan {scan_id} requested"), &c.name, Some(&project_id), &[("job_id", &job.job_id), ("scan_id", &scan_id)]);
+    st.emit_job(&job);
+    tokio::spawn(crate::worker::run_measure(st.clone(), job.job_id.clone(), scan_id));
+    Ok(job)
+}
+
+async fn get_measurement(State(st): St, h: HeaderMap, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    st.caller(&h)?;
+    let inner = st.inner.lock().unwrap();
+    inner.measurements.get(&id).cloned().map(Json).ok_or_else(|| ApiError::not_found("measurement"))
+}
+
+async fn get_measurement_evidence(State(st): St, h: HeaderMap, Path(id): Path<String>) -> ApiResult<Response> {
+    st.caller(&h)?;
+    let path = st.inner.lock().unwrap().measurement_files.get(&id).cloned().ok_or_else(|| ApiError::not_found("measurement"))?;
+    let bytes = tokio::fs::read(&path).await.map_err(io_err)?;
+    Ok(([(header::CONTENT_TYPE, "image/png")], bytes).into_response())
 }
 
 async fn get_export(State(st): St, h: HeaderMap, Path(id): Path<String>) -> ApiResult<Json<Value>> {

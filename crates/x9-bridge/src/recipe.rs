@@ -35,7 +35,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 /// Operations an `action` step may call.
-pub const OPERATIONS: &[&str] = &["startScan", "aimFromPreview", "exportPoints", "addLogNote"];
+pub const OPERATIONS: &[&str] = &["startScan", "aimFromPreview", "exportPoints", "measureOpening", "addLogNote"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecipeInput {
@@ -67,6 +67,11 @@ pub struct RecipeStep {
     /// For `person` steps: show this earlier step's scan preview.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_of: Option<String>,
+    /// For `person` steps: when the step is reached, the bridge proposes its
+    /// `needs` from this earlier step's output (same-named fields), so the
+    /// person only confirms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub propose_from: Option<String>,
     /// For `check` steps: the earlier step whose checks are inspected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub of: Option<String>,
@@ -153,6 +158,14 @@ impl Recipe {
             if let Some(p) = &s.preview_of {
                 if !seen.contains(p.as_str()) || p == &s.step_id {
                     return Err(format!("{where_}: `preview_of` must name an earlier step"));
+                }
+            }
+            if let Some(p) = &s.propose_from {
+                if s.kind != "person" {
+                    return Err(format!("{where_}: `propose_from` is for person steps"));
+                }
+                if !seen.contains(p.as_str()) || p == &s.step_id {
+                    return Err(format!("{where_}: `propose_from` must name an earlier step"));
                 }
             }
             let mut refs = Vec::new();
