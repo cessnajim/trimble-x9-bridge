@@ -20,6 +20,12 @@
 //!   (scaled by the speed factor like every other duration)
 //! - `X9_MOCK_FIXTURES` directory with `dome.tzf`, `dome.jpg`, `area.tzf`,
 //!   `area.jpg`: served for full-dome and area scans' files and previews
+//! - `X9_MOCK_REPLAY` directory of a recorded survey: `station_01.tzf`,
+//!   `station_01.jpg`, … and `manifest.json` (`[{"station": 1, "points": n},
+//!   …]`). The n-th full dome in a project is station n, with its real file,
+//!   preview and point count, as if the crew had moved the tripod there
+//!   (`instrumentMovedSinceLastScan` reads true). After the last recorded
+//!   station, and for area scans (a recording has none), scans are refused.
 
 use axum::{
     extract::{Path, State},
@@ -42,6 +48,22 @@ struct Mock {
     battery: u32,
     on_ac: bool,
     speed: f64,
+    /// Replay: the recording's directory and each station's point count.
+    replay: Option<(String, Vec<u64>)>,
+}
+
+/// Load a replay's manifest: point counts in station order.
+fn load_replay(dir: &str) -> Vec<u64> {
+    let m: Value = std::fs::read(format!("{dir}/manifest.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_else(|| panic!("X9_MOCK_REPLAY: {dir}/manifest.json is missing or not JSON"));
+    let mut st: Vec<(u64, u64)> = m
+        .as_array()
+        .map(|a| a.iter().filter_map(|s| Some((s["station"].as_u64()?, s["points"].as_u64()?))).collect())
+        .unwrap_or_default();
+    st.sort();
+    st.into_iter().map(|(_, p)| p).collect()
 }
 
 type Shared = Arc<Mutex<Mock>>;
@@ -64,6 +86,11 @@ async fn main() {
         battery: env("X9_MOCK_BATTERY", "87").parse().unwrap_or(87),
         on_ac: env("X9_MOCK_ON_AC", "0") == "1",
         speed: env("X9_MOCK_SPEED", "10").parse().unwrap_or(10.0),
+        replay: std::env::var("X9_MOCK_REPLAY").ok().map(|d| {
+            let pts = load_replay(&d);
+            eprintln!("x9-mock: replaying {} recorded stations from {d}", pts.len());
+            (d, pts)
+        }),
     };
     let shared: Shared = Arc::new(Mutex::new(mock));
 
@@ -97,7 +124,7 @@ async fn status(State(m): State<Shared>) -> Json<Value> {
         "currentTaskID": task_id,
         "errorList": [{"description": "", "errorLevel": "Information", "type": "NoError"}],
         "imuData": {"confidence": 1, "firmwareVersion": "", "orientation": 0, "timestamp": 0},
-        "instrumentMovedSinceLastScan": false,
+        "instrumentMovedSinceLastScan": m.replay.is_some(),
         "laserPointerState": {"laserEnabled": false},
         "leveling": {"compensatorStatus": "on", "levelingStatus": "ok", "sighting": 0.0155, "trunnion": 0.0230},
         "pluggedToAC": m.on_ac,
@@ -236,6 +263,17 @@ async fn launch_scan(State(m): State<Shared>, Json(req): Json<Value>) -> (Status
         if g.task.is_some() {
             return (StatusCode::CONFLICT, Json(json!({"error": "taskManager is busy"})));
         }
+        if let Some((_, pts)) = &g.replay {
+            if req["scanType"] == "AreaScan" {
+                return (StatusCode::CONFLICT, Json(json!({"error": "replay: the recording has no area scans"})));
+            }
+            let done = g.scans.iter().filter(|s| s["tzf"]["file"].as_str().is_some_and(|f| {
+                f.starts_with(&format!("{}/", req["projectName"].as_str().unwrap_or(""))) && !f.rsplit('/').next().unwrap_or("").contains('_')
+            })).count();
+            if done >= pts.len() {
+                return (StatusCode::CONFLICT, Json(json!({"error": format!("replay: all {} recorded stations are scanned", pts.len())})));
+            }
+        }
         let id = g.next_task_id;
         g.next_task_id += 1;
         let fallback = std::env::var("X9_MOCK_FALLBACK_MODE").ok().filter(|m| req["scanMode"] == m.as_str());
@@ -298,7 +336,17 @@ async fn simulate(m: Shared, task: Value) {
         if g.task.as_ref().and_then(|t| t["id"].as_i64()) != Some(id) || g.cancelled == Some(id) {
             return;
         }
-        let (short, n) = file_scan(&mut g, req, full_points(req));
+        let points = match &g.replay {
+            Some((_, pts)) if req["scanType"] != "AreaScan" => {
+                let project = req["projectName"].as_str().unwrap_or("").to_string();
+                let done = g.scans.iter().filter(|s| s["tzf"]["file"].as_str().is_some_and(|f| {
+                    f.starts_with(&format!("{project}/")) && !f.rsplit('/').next().unwrap_or("").contains('_')
+                })).count();
+                pts.get(done).copied().unwrap_or_else(|| full_points(req))
+            }
+            _ => full_points(req),
+        };
+        let (short, n) = file_scan(&mut g, req, points);
         if let Some(t) = g.task.as_mut() {
             t["file"] = json!(short);
             t["scanID"] = json!(n);
@@ -321,13 +369,17 @@ async fn simulate(m: Shared, task: Value) {
 
 /// Fixture for a scan: `area` if its file name has a `_` (an area scan), else `dome`.
 async fn fixture(m: &Shared, id: i64, ext: &str) -> Result<Vec<u8>, StatusCode> {
-    let dir = std::env::var("X9_MOCK_FIXTURES").map_err(|_| StatusCode::NOT_FOUND)?;
-    let file = {
+    let (file, replay) = {
         let g = m.lock().unwrap();
         let s = g.scans.iter().find(|s| s["tzfId"].as_i64() == Some(id)).ok_or(StatusCode::NOT_FOUND)?;
-        s["tzf"]["file"].as_str().unwrap_or("").to_string()
+        (s["tzf"]["file"].as_str().unwrap_or("").to_string(), g.replay.as_ref().map(|(d, _)| d.clone()))
     };
     let base = file.rsplit('/').next().unwrap_or("");
+    // A replayed full dome: `<project>/<station>.tzf` is the recording's station.
+    if let (Some(dir), Some(st)) = (replay, base.strip_suffix(".tzf").and_then(|n| n.parse::<u32>().ok())) {
+        return tokio::fs::read(format!("{dir}/station_{st:02}.{ext}")).await.map_err(|_| StatusCode::NOT_FOUND);
+    }
+    let dir = std::env::var("X9_MOCK_FIXTURES").map_err(|_| StatusCode::NOT_FOUND)?;
     let kind = if base.contains('_') { "area" } else { "dome" };
     tokio::fs::read(format!("{dir}/{kind}.{ext}")).await.map_err(|_| StatusCode::NOT_FOUND)
 }
@@ -359,7 +411,32 @@ mod tests {
             battery: 87,
             on_ac: false,
             speed: 100.0,
+            replay: None,
         }))
+    }
+
+    #[tokio::test]
+    async fn replay_serves_recorded_stations_and_refuses_the_rest() {
+        let dir = std::env::temp_dir().join(format!("x9-replay-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("station_01.tzf"), b"station one").unwrap();
+        let m = mock(json!(null));
+        {
+            let mut g = m.lock().unwrap();
+            g.task = None;
+            g.replay = Some((dir.to_string_lossy().into_owned(), vec![20_060_402]));
+            g.scans.push(json!({"id": 0, "tzfId": 0, "tzf": {"file": "p/1.tzf", "nbPoints": 20_060_402u64}}));
+        }
+        assert_eq!(fixture(&m, 0, "tzf").await.unwrap(), b"station one");
+        let area = json!({"scanType": "AreaScan", "projectName": "p", "scanMode": "STD_L1"});
+        let (code, Json(body)) = launch_scan(State(m.clone()), Json(area)).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert!(body["error"].as_str().unwrap().contains("no area scans"));
+        let dome = json!({"scanType": "FullDome", "projectName": "p", "scanMode": "STD_L1"});
+        let (code, Json(body)) = launch_scan(State(m.clone()), Json(dome)).await;
+        assert_eq!(code, StatusCode::CONFLICT, "{body}");
+        assert!(body["error"].as_str().unwrap().contains("all 1 recorded stations"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn task(state: &str, pct: f64) -> Value {
