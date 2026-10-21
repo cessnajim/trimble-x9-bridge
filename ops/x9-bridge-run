@@ -1,10 +1,18 @@
 #!/bin/sh
 # Start x9-bridge against whichever link to the scanner answers: USB first
 # (faster), then the scanner's Wi-Fi. X9_BASE in the environment wins.
-# The link is chosen at start; systemd restarts the bridge if it exits.
+# A link that has just come up may take a few seconds to answer, so keep
+# trying both for up to X9_LINK_WAIT seconds (default 30) before falling back
+# to USB. The link is chosen at start; systemd restarts the bridge if it exits,
+# and ops/90-x9-bridge restarts it when a scanner link comes up.
 if [ -z "${X9_BASE:-}" ]; then
-  for B in http://192.168.42.1:34567/api/v1 http://192.168.43.1:34567/api/v1; do
-    if curl -s -m 2 -o /dev/null "$B/tasks"; then X9_BASE=$B; break; fi
+  deadline=$(( $(date +%s) + ${X9_LINK_WAIT:-30} ))
+  while [ -z "${X9_BASE:-}" ]; do
+    for B in http://192.168.42.1:34567/api/v1 http://192.168.43.1:34567/api/v1; do
+      if curl -s -m 2 -o /dev/null "$B/tasks"; then X9_BASE=$B; break; fi
+    done
+    [ -n "${X9_BASE:-}" ] || [ "$(date +%s)" -ge "$deadline" ] && break
+    sleep 2
   done
   X9_BASE="${X9_BASE:-http://192.168.42.1:34567/api/v1}"
 fi
