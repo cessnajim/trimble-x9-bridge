@@ -24,6 +24,7 @@ mod routes;
 mod rules;
 mod runs;
 mod state;
+mod station;
 mod ui;
 mod util;
 mod view;

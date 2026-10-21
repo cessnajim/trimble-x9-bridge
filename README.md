@@ -25,6 +25,10 @@ trademarks of their respective owners.
 - **Exports:** levelled PLY, LAS or COPC (Cloud Optimized Point Cloud) via
   [trimble-tzf](https://github.com/northidaholabs/trimble-tzf), with automatic
   checks (point count, levelled, coordinates).
+- **Next-station proposals:** the agent marks where to set up next on the
+  station's preview (a tripod on the ground, labels for what was seen and
+  what is hidden, landmarks to walk by) with directions in prose; the bridge
+  draws the picture and shows it in the web UI.
 - **Viewing and coverage:** thinned points for a browser viewer, and each
   scan's coverage: point spacing and a plan of what the scanner saw and where
   it was blocked (shadows), as JSON and an image an agent can look at.

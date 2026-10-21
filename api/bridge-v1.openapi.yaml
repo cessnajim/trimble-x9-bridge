@@ -328,6 +328,68 @@ paths:
               schema: { type: string, format: binary }
         default: { $ref: "#/components/responses/Problem" }
 
+  /scans/{scan_id}/next-station:
+    parameters: [{ $ref: "#/components/parameters/ScanId" }]
+    put:
+      tags: [scans]
+      operationId: proposeNextStation
+      summary: Show the person where to set up next, on this station's preview.
+      description: |
+        Checked against the preview (everything inside it), drawn, kept (the
+        latest per scan), logged and announced as a `next_station` event. Any
+        role but `viewer`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NextStationRequest" }
+      responses:
+        "200":
+          description: The kept proposal.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NextStation" }
+        default: { $ref: "#/components/responses/Problem" }
+    get:
+      tags: [scans]
+      operationId: getNextStation
+      responses:
+        "200":
+          description: The latest proposal for this scan.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NextStation" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /scans/{scan_id}/next-station/image:
+    parameters: [{ $ref: "#/components/parameters/ScanId" }]
+    get:
+      tags: [scans]
+      operationId: getNextStationImage
+      summary: The preview with the proposal drawn on it.
+      responses:
+        "200":
+          description: PNG.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /next-stations:
+    get:
+      tags: [scans]
+      operationId: listNextStations
+      summary: Every scan's latest proposal, newest first.
+      responses:
+        "200":
+          description: Proposals.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/NextStation" }
+        default: { $ref: "#/components/responses/Problem" }
+
   /aim:
     post:
       tags: [aiming]
@@ -1213,6 +1275,54 @@ components:
             use the scan's preview when it can be downloaded, else mid-grey.
             `preview` fails the export (`decode_failed`) without a preview.
             `none` writes mid-grey. Points are always levelled.
+
+    NextStationRequest:
+      type: object
+      required: [marker, note]
+      properties:
+        marker:
+          type: object
+          required: [x, y]
+          properties:
+            x: { type: integer, description: Preview pixel, on the ground where the tripod should stand. }
+            y: { type: integer }
+            label: { type: string, maxLength: 80 }
+        note: { type: string, minLength: 1, maxLength: 600, description: "Directions in prose, by landmarks; never compass words." }
+        labels:
+          type: array
+          items:
+            type: object
+            required: [x, y, text]
+            properties:
+              x: { type: integer }
+              y: { type: integer }
+              text: { type: string, maxLength: 80 }
+              kind: { type: string, enum: [seen, hidden, landmark], default: landmark }
+        boxes:
+          type: array
+          items:
+            type: object
+            required: [x0, y0, x1, y1]
+            properties:
+              x0: { type: integer }
+              y0: { type: integer }
+              x1: { type: integer }
+              y1: { type: integer }
+              text: { type: string, maxLength: 80 }
+              kind: { type: string, enum: [seen, hidden, landmark], default: landmark }
+
+    NextStation:
+      allOf:
+        - { $ref: "#/components/schemas/NextStationRequest" }
+        - type: object
+          properties:
+            scan_id: { type: string }
+            project_id: { type: string }
+            station: { type: integer }
+            proposed_by: { type: string }
+            at: { type: string, format: date-time }
+            preview_size: { type: array, items: { type: integer }, minItems: 2, maxItems: 2 }
+            image_url: { type: string }
 
     Coverage:
       type: object

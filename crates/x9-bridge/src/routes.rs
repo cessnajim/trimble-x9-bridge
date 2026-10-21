@@ -48,6 +48,9 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/v1/scans/:scan_id/view", get(scan_view))
         .route("/v1/scans/:scan_id/coverage", get(scan_coverage))
         .route("/v1/scans/:scan_id/coverage/image", get(scan_coverage_image))
+        .route("/v1/scans/:scan_id/next-station", get(get_next_station).put(put_next_station))
+        .route("/v1/scans/:scan_id/next-station/image", get(get_next_station_image))
+        .route("/v1/next-stations", get(list_next_stations))
         .route("/v1/scans/:scan_id/exports", post(start_export))
         .route("/v1/exports/:export_id", get(get_export))
         .route("/v1/exports/:export_id/file", get(get_export_file))
@@ -488,6 +491,55 @@ async fn scan_coverage_image(State(st): St, h: HeaderMap, Path(id): Path<String>
     let p = view_file(&st, &id, ViewPart::Image).await?;
     let bytes = tokio::fs::read(&p).await.map_err(io_err)?;
     Ok(([(header::CONTENT_TYPE, "image/png")], bytes).into_response())
+}
+
+/// The agent's next-station proposal on a scan's preview: checked, drawn and
+/// kept (the latest per scan), and announced to every client.
+async fn put_next_station(State(st): St, h: HeaderMap, Path(id): Path<String>, body: Bytes) -> ApiResult<Response> {
+    let c = st.require(&h, |r| r != Role::Viewer, "propose stations")?;
+    let p: crate::station::Proposal = parse(&body)?;
+    let scan = all_scans(&st).await?.into_iter().find(|s| s["scan_id"] == id.as_str()).ok_or_else(|| ApiError::not_found("scan"))?;
+    let path = scan_file(&st, &id, FileKind::Preview).await?;
+    let jpg = tokio::fs::read(&path).await.map_err(io_err)?;
+    let (pw, ph, grey) = aim::jpeg_luma(&jpg).map_err(|e| ApiError::invalid(format!("preview: {e}")))?;
+    p.check(pw, ph).map_err(ApiError::invalid)?;
+    let p2 = p.clone();
+    let png = tokio::task::spawn_blocking(move || crate::station::render(&grey, pw, ph, &p2))
+        .await
+        .map_err(|e| ApiError::cache(format!("drawing: {e}")))?;
+    let project_id = scan["project_id"].as_str().unwrap_or("").to_string();
+    let mut v = p.to_json();
+    v["scan_id"] = json!(id);
+    v["project_id"] = json!(project_id);
+    v["station"] = scan["station"].clone();
+    v["proposed_by"] = json!(c.name);
+    v["at"] = json!(now_rfc3339());
+    v["preview_size"] = json!([pw, ph]);
+    v["image_url"] = json!(format!("/v1/scans/{id}/next-station/image"));
+    st.inner.lock().unwrap().next_stations.insert(id.clone(), (v.clone(), png));
+    st.log("note", format!("Next station proposed from station {}: {}", scan["station"], p.note), &c.name, Some(&project_id), &[("scan_id", &id)]);
+    st.emit("next_station", v.clone());
+    Ok(Json(v).into_response())
+}
+
+async fn get_next_station(State(st): St, h: HeaderMap, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    st.caller(&h)?;
+    let inner = st.inner.lock().unwrap();
+    inner.next_stations.get(&id).map(|(v, _)| Json(v.clone())).ok_or_else(|| ApiError::not_found("next-station proposal"))
+}
+
+async fn get_next_station_image(State(st): St, h: HeaderMap, Path(id): Path<String>) -> ApiResult<Response> {
+    st.caller(&h)?;
+    let png = st.inner.lock().unwrap().next_stations.get(&id).map(|(_, p)| p.clone()).ok_or_else(|| ApiError::not_found("next-station proposal"))?;
+    Ok(([(header::CONTENT_TYPE, "image/png")], png).into_response())
+}
+
+/// Every proposal the bridge holds, newest first.
+async fn list_next_stations(State(st): St, h: HeaderMap) -> ApiResult<Json<Value>> {
+    st.caller(&h)?;
+    let mut all: Vec<Value> = st.inner.lock().unwrap().next_stations.values().map(|(v, _)| v.clone()).collect();
+    all.sort_by(|a, b| b["at"].as_str().cmp(&a["at"].as_str()));
+    Ok(Json(json!(all)))
 }
 
 fn default_margin() -> f64 {

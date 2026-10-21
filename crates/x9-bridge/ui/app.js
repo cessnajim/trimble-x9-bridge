@@ -49,6 +49,8 @@ const S = {
   exports: {},     // export_id -> export record
   measurements: {}, // measurement_id -> measurement record
   grants: [],      // active grants
+  nextStations: [], // the agent's next-station proposals, newest first
+  nsImages: new Map(), // scan_id|at -> object URL | "loading" | {error}
   evidence: new Map(), // measurement_id -> object URL | "loading" | {error}
   watchMeasure: {}, // scan_id -> job_id
   watchExport: {}, // scan_id -> job_id
@@ -202,6 +204,7 @@ async function load(what) {
       case "modes": S.modes = await api("/scan-modes"); break;
       case "log": S.log = (await api("/log")).reverse(); break;
       case "grants": S.grants = await api("/grants"); break;
+      case "next-stations": S.nextStations = await api("/next-stations"); break;
       case "scans":
         S.scans = S.project ? await api(`/scans?project_id=${encodeURIComponent(S.project)}`) : [];
         for (const sc of S.scans) S.scanById[sc.scan_id] = sc;
@@ -238,6 +241,29 @@ function preview(scanId) {
 async function loadMeasurement(id) {
   try { S.measurements[id] = await api(`/measurements/${encodeURIComponent(id)}`); } catch (e) { S.measurements[id] = { error: e.message }; }
   render();
+}
+
+function nsImage(p) {
+  const key = `${p.scan_id}|${p.at}`;
+  const got = S.nsImages.get(key);
+  if (got) return got;
+  S.nsImages.set(key, "loading");
+  api(`/scans/${encodeURIComponent(p.scan_id)}/next-station/image`, { raw: true })
+    .then((r) => r.blob())
+    .then((b) => S.nsImages.set(key, URL.createObjectURL(b)))
+    .catch((e) => S.nsImages.set(key, { error: e.message }))
+    .finally(() => render());
+  return "loading";
+}
+
+// The agent's proposal for where to set up next: the picture and its directions.
+function nextStationCard(p) {
+  const img = nsImage(p);
+  const pic = img === "loading" ? `<div class="placeholder small">Loading the picture…</div>`
+    : img?.error ? `<div class="problem">${esc(img.error)}</div>`
+    : `<a href="${esc(img)}" target="_blank" rel="noopener" title="Open full size"><img class="nextstation" src="${esc(img)}" alt="The station's view, marked with where to set up next"></a>`;
+  return `<div class="card attn"><div class="line"><strong>Set up the next station</strong><span class="meta">from station ${esc(p.station ?? "")} · ${esc(p.proposed_by)} · ${esc(ago(p.at))}</span></div>
+    <p class="ns-note">${esc(p.note)}</p>${pic}</div>`;
 }
 
 function evidence(id) {
@@ -309,6 +335,8 @@ function onEvent(chunk) {
         location.hash = `#/view/${encodeURIComponent(v.result.scan_id)}`;
       }
     }
+  } else if (kind === "next_station") {
+    S.nextStations = [v, ...S.nextStations.filter((p) => p.scan_id !== v.scan_id)];
   } else if (kind === "run") {
     upsertRun(v);
     S.runs.sort(byNewest);
@@ -350,7 +378,7 @@ async function stream() {
 }
 
 function refreshAll() {
-  ["status", "jobs", "runs", "recipes", "projects", "modes", "log", "scans", "grants"].forEach(load);
+  ["status", "jobs", "runs", "recipes", "projects", "modes", "log", "scans", "grants", "next-stations"].forEach(load);
 }
 
 // ----------------------------------------------------------------- routes ---
@@ -515,7 +543,8 @@ function viewNow() {
     <h2>Now</h2><section>${active.length ? active.map((j) => jobCard(j)).join("") : `<p class="empty">Nothing running.</p>`}
       ${canAct() ? `<button class="btn primary wide" data-act="sheet-scan">New full-dome scan</button>` : ""}</section>
     </div><div>
-    <h2 class="first">Needs you</h2><section>${needs.length ? needs.join("") : `<p class="empty">Nothing needs you.</p>`}</section>
+    ${(() => { const p = S.nextStations.find((x) => !S.project || x.project_id === S.project) ?? S.nextStations[0]; return p ? `<h2 class="first">Next station</h2><section>${nextStationCard(p)}</section>` : ""; })()}
+    <h2 class="${S.nextStations.length ? "" : "first"}">Needs you</h2><section>${needs.length ? needs.join("") : `<p class="empty">Nothing needs you.</p>`}</section>
     ${recent.length ? `<h2>Recent</h2><section>${recent.map((j) => jobCard(j, { actions: false })).join("")}</section>` : ""}
     </div></div>`;
 }
@@ -750,6 +779,7 @@ function viewScan(id) {
       ${partialOf ? `<div class="note">This is the partial sweep of a cancelled scan.</div>` : ""}
       <a class="btn primary wide" style="margin-top:12px" href="#/view/${encodeURIComponent(id)}">View the points</a>
     </div></section>
+    ${(() => { const p = S.nextStations.find((x) => x.scan_id === id); return p ? `<h2>Next station from here</h2><section>${nextStationCard(p)}</section>` : ""; })()}
     <h2>Aim an area scan</h2>
     <section class="card">
       ${picker(key, id)}

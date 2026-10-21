@@ -847,6 +847,35 @@ coverage only, never intensity.
 
 Deleting a scan deletes its view and coverage files.
 
+### Propose the next station
+
+After checking a station's coverage, the agent shows the person where to set
+up next, on that station's preview, so they recognise the spot:
+
+```bash
+curl -s -X PUT -H "$H" -d '{
+  "marker": {"x": 1335, "y": 540, "label": "on the path, ~3 m past the corner"},
+  "note": "Carry the tripod along the house wall to its right-hand end, past the bush, and set up on the path about 3 m beyond the corner.",
+  "boxes":  [{"x0": 755, "y0": 415, "x1": 865, "y1": 500, "text": "Seen face-on: the wall with the two windows", "kind": "seen"}],
+  "labels": [{"x": 1262, "y": 430, "text": "Hidden: everything past this corner", "kind": "hidden"},
+             {"x": 380, "y": 470, "text": "Shed door", "kind": "landmark"}]
+}' $B/scans/$SCAN/next-station
+curl -s -H "$H" -o next.png $B/scans/$SCAN/next-station/image
+curl -s -H "$H" $B/next-stations          # every scan's latest proposal, newest first
+```
+
+| Field | What |
+| --- | --- |
+| `marker` | Where the tripod should stand, in preview pixels, on the ground; `label` goes under "SET UP HERE" |
+| `note` | The directions in prose, by landmarks the person can see (1–600 characters). Never compass words: a scan's axes are wherever the scanner's zero angle pointed |
+| `labels`, `boxes` | Up to 12 together, texts up to 80 characters; `kind` `seen` (green), `hidden` (red) or `landmark` (white) |
+
+The bridge checks everything lies inside the preview (`400 invalid_request`
+otherwise), draws the picture (the annotated part of the panorama, enlarged,
+text kept inside the frame), keeps the latest proposal per scan, writes the
+note to the field log and sends a `next_station` event. Any role but `viewer`.
+Proposals are kept in memory; deleting the scan deletes its proposal.
+
 ### Download the raw scan file
 
 ```bash
@@ -980,6 +1009,7 @@ stops and deletes.
 | **Runs** | Start a recipe (project and inputs). A step the agent decides itself (`review = "final"`) is not listed under "Needs you"; its answer is shown again at the sign-off next to the result, and a person may answer it instead (folded away). A run's page shows its person interventions and the grants its scans ran under. Each run's steps, what it waits for, and its problem if it failed. A `person` step shows its instructions and a form for its `needs`; a `box` need shows the `preview_of` step's preview to draw on. When the agent has proposed an answer, the step shows it (the box on the preview, the values in the form, the agent's note) with **Looks right**; drawing a new box or editing a value changes it first. Cancel a run. |
 | **Scans** | Pick or create a project; scans grouped by station, area scans under their full dome. A scan: its preview, **measure the opening** (values, checks, evidence image), **aim** (draw a box, see the window in degrees, pick a mode, scan the area), **export** PLY or LAS with its checks and a download, download the raw `.tzf`, delete (operator). |
 | **Log** | The field log, newest first, and a note form. |
+| **Next station** | The agent's latest proposal is at the top of Now (and on that scan's page): its directions and the station's view with "SET UP HERE"; click the picture for full size. It updates as soon as the agent proposes. |
 | **Viewer** (`#/view/<scan_id>`, from a scan's **View the points** or the Scans tab's **View the latest scan**) | The scan's points in 3D, coloured by intensity, height or coverage (spacing class, with shadows drawn on the floor in red and a legend). **Plan** shows the coverage plan; **No ceiling** (on for full domes) hides the ceiling to see into the room; **From scanner** puts you where the scanner stood to look around; **Overview** goes back. Drag to turn, right-drag or shift-drag to pan, scroll or pinch to zoom. **Follow new scans** (on by default) opens each new scan in the same project as soon as it is done, and a line at the top says what is scanning meanwhile. |
 
 Things to know:

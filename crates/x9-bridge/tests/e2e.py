@@ -326,6 +326,23 @@ try:
         s, j = measure({"kind": "opening", "box": {"x0": 523, "y0": 564, "x1": 674, "y1": 418}})
         check("a box with y0 > y1 fails the measurement with measure_failed", s == 0 and j["state"] == "failed"
               and j["problem"]["code"] == "measure_failed" and "y0 < y1" in j["problem"]["detail"], j)
+        # Next-station proposal: drawn on the preview, kept, listed, shown.
+        prop = {"marker": {"x": 900, "y": 600, "label": "by the door"}, "note": "Set up by the door, on the rug.",
+                "labels": [{"x": 500, "y": 450, "text": "Window: seen", "kind": "seen"}],
+                "boxes": [{"x0": 523, "y0": 418, "x1": 674, "y1": 564, "text": "The window", "kind": "seen"}]}
+        s, b = call("PUT", f"/scans/{station_scan}/next-station", "viewer", prop)
+        check("viewer can't propose a station (403)", s == 403, b)
+        s, b = call("PUT", f"/scans/{station_scan}/next-station", "agent", {**prop, "marker": {"x": 99999, "y": 1}})
+        check("a marker off the preview is refused (400)", s == 400 and "marker" in b["detail"], b)
+        s, ns = call("PUT", f"/scans/{station_scan}/next-station", "agent", prop)
+        s2, ctype, png = fetch(f"/scans/{station_scan}/next-station/image", "viewer")
+        _, lst = call("GET", "/next-stations", "viewer")
+        check("an agent proposes the next station; the bridge draws it, keeps it and lists it",
+              s == 200 and ns["proposed_by"] == "agent-1" and ns["preview_size"] == [2082, 815] and ns["marker"]["x"] == 900
+              and s2 == 200 and ctype == "image/png" and png[1:4] == b"PNG" and lst and lst[0]["scan_id"] == station_scan
+              and "next_station" in events, (s, ns, s2, ctype))
+        s, _ = call("PUT", f"/scans/{sc2['scan_id']}/next-station", "agent", {**prop, "marker": {"x": 100, "y": 100}})
+        check("a proposal on the area scan too", s == 200, s)
     # --- recipes and runs ---
     s, rl = call("GET", "/recipes", "viewer")
     check("recipes listed, the broken one skipped", s == 200 and sorted(r["recipe_id"] for r in rl) == ["log-note", "window-measurement"], rl)
@@ -527,6 +544,8 @@ try:
         s, _ = call("GET", f"/exports/{ex.get('export_id')}", "viewer")
         s2, _, _ = fetch(f"/exports/{ex.get('export_id')}/file", "viewer")
         check("delete also removes exports made from the scan", s == 404 and s2 == 404, (s, s2))
+        s, _ = call("GET", f"/scans/{sc2['scan_id']}/next-station", "viewer")
+        check("delete also removes the scan's next-station proposal", s == 404, s)
         views = os.listdir(os.path.join(tmp, "data", "views"))
         check("delete also removes the scan's view and coverage files", not any(v.startswith(sc2["scan_id"]) for v in views)
               and any(v.startswith(station_scan) for v in views), views)

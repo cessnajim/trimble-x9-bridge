@@ -45,6 +45,7 @@ pub async fn evict(st: &AppState, scan_id: &str) {
     for kind in FileKind::ALL {
         let _ = tokio::fs::remove_file(cache_path(&st.data_dir, id, kind)).await;
     }
+    st.inner.lock().unwrap().next_stations.remove(id);
     if let Ok(mut d) = tokio::fs::read_dir(st.data_dir.join("views")).await {
         while let Ok(Some(e)) = d.next_entry().await {
             if e.file_name().to_string_lossy().starts_with(&format!("{id}.")) || e.file_name().to_string_lossy().starts_with(&format!("{id}-")) {

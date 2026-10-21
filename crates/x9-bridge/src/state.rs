@@ -50,6 +50,8 @@ pub struct Inner {
     pub measurements: HashMap<String, Value>,
     /// Evidence images, by measurement id.
     pub measurement_files: HashMap<String, std::path::PathBuf>,
+    /// The agent's latest next-station proposal per scan: its JSON and picture.
+    pub next_stations: HashMap<String, (Value, Vec<u8>)>,
     pub runs: HashMap<String, crate::runs::RunRecord>,
     /// Scanner tasks the bridge cancelled that may still be listed in `/tasks`.
     pub cancelled_tasks: HashSet<i64>,
