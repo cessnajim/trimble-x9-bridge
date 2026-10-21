@@ -397,7 +397,7 @@ function viewSignin() {
   return `<div class="signin">
     <img class="logo" src="icon.svg" alt="">
     <h1>X9 Bridge</h1>
-    <p class="meta">Paste the token you were given for this bridge. It stays on this phone.</p>
+    <p class="meta">Paste the token you were given for this bridge. It is kept in this browser.</p>
     ${S.signinError ? `<div class="problem">${esc(S.signinError)}</div>` : ""}
     <form data-form="signin">
       <label class="field"><span>Token</span><input name="token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" required></label>
@@ -410,7 +410,7 @@ function viewTop() {
   const r = S.route;
   const title = r.run ? "Run" : r.scan ? "Scan" : { now: "Now", runs: "Recipes and runs", scans: "Scans", log: "Field log" }[r.tab];
   const back = r.run || r.scan ? `<button class="back" data-act="back">‹ Back</button>` : "";
-  return `<header class="top">${back}<h1>${esc(title)}</h1>
+  return `<header class="top">${back}<span class="brand">X9 Bridge</span><h1 class="${back ? "" : "tab-title"}">${esc(title)}</h1>${viewNav()}
     <span class="live ${S.live ? "on" : ""}">${S.live ? "Live" : "Offline"}</span>
     <button class="who" data-act="me">${esc(S.me?.name ?? "")}</button></header>`;
 }
@@ -487,11 +487,14 @@ function viewNow() {
     }),
   ];
 
-  return `<section>${scanner}</section>
-    ${needs.length ? `<h2>Needs you</h2><section>${needs.join("")}</section>` : ""}
+  return `<div class="cols"><div>
+    <section>${scanner}</section>
     <h2>Now</h2><section>${active.length ? active.map((j) => jobCard(j)).join("") : `<p class="empty">Nothing running.</p>`}
       ${canAct() ? `<button class="btn primary wide" data-act="sheet-scan">New full-dome scan</button>` : ""}</section>
-    ${recent.length ? `<h2>Recent</h2><section>${recent.map((j) => jobCard(j, { actions: false })).join("")}</section>` : ""}`;
+    </div><div>
+    <h2 class="first">Needs you</h2><section>${needs.length ? needs.join("") : `<p class="empty">Nothing needs you.</p>`}</section>
+    ${recent.length ? `<h2>Recent</h2><section>${recent.map((j) => jobCard(j, { actions: false })).join("")}</section>` : ""}
+    </div></div>`;
 }
 
 const CHECKS = { point_count: "Point count", levelled: "Levelled", coordinates: "Coordinates", intensity: "Intensity" };
@@ -695,6 +698,7 @@ function viewScan(id) {
         <label class="field"><span>Scan mode</span><select name="mode" data-change="mode">${modeOpts}</select></label>
         <button class="btn primary wide" data-act="scan-area" data-id="${esc(id)}" ${S.busy ? "disabled" : ""}>Scan this area</button>` : ""}
     </section>
+    <div class="cols even"><div>
     <h2>Measure</h2>
     <section class="card">
       ${(() => {
@@ -706,6 +710,7 @@ function viewScan(id) {
       })()}
       ${canAct() ? `<div class="btns"><button class="btn" data-act="measure" data-id="${esc(id)}" ${S.busy ? "disabled" : ""}>Measure the opening</button></div>` : ""}
     </section>
+    </div><div>
     <h2>Points</h2>
     <section class="card">
       ${exportJob && exportJob.state !== "succeeded" ? jobCard(exportJob) : ""}
@@ -717,6 +722,7 @@ function viewScan(id) {
         <button class="btn" data-act="export" data-id="${esc(id)}" data-format="copc" ${S.busy ? "disabled" : ""}>Export COPC</button></div>` : ""}
       <div class="btns"><button class="btn" data-act="dl-tzf" data-id="${esc(id)}">Download raw .tzf</button></div>
     </section>
+    </div></div>
     ${isOp() ? `<h2>Delete</h2><section><button class="btn danger wide" data-act="delete-scan" data-id="${esc(id)}" ${S.busy ? "disabled" : ""}>Delete this scan from the scanner</button></section>` : ""}`;
 }
 
@@ -815,7 +821,7 @@ function render(force = false) {
     render.lastBusy = S.busy;
     return;
   }
-  root.innerHTML = viewTop() + `<main>${viewMain()}</main>` + viewNav() + viewSheet() +
+  root.innerHTML = viewTop() + `<main>${viewMain()}</main>` + viewSheet() +
     (S.toast ? `<div class="toast ${S.toast.bad ? "bad" : ""}" role="status">${esc(S.toast.text)}</div>` : "");
   root.querySelectorAll("[data-keep-scroll]").forEach((el) => {
     const k = el.dataset.keepScroll;
@@ -852,6 +858,11 @@ function render(force = false) {
   });
 }
 document.addEventListener("focusout", () => setTimeout(() => { if (pending) render(); }, 0));
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (S.sheet) { S.sheet = null; render(true); }
+  else if (S.route.view) location.hash = `#/scan/${encodeURIComponent(S.route.scan)}`;
+});
 
 // ----------------------------------------------------------------- viewer ---
 let viewer = null;
@@ -1082,7 +1093,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden && S.
 // ------------------------------------------------------------------- boot ---
 async function boot() {
   // A token can arrive in the link (?token=…), e.g. from a QR code; it is then
-  // kept on the phone and removed from the address bar.
+  // kept in this browser and removed from the address bar.
   const q = new URLSearchParams(location.search);
   const t = q.get("token");
   if (t) {

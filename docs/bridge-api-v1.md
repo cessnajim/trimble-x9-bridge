@@ -7,7 +7,7 @@
 Status: **draft 3** (2026-10-20); skeleton implemented in `crates/x9-bridge`. Spec: [`api/bridge-v1.openapi.yaml`](../api/bridge-v1.openapi.yaml).
 
 The bridge service is the only thing that talks to the scanner. Every client
-(AI agents via the MCP server, the phone web UI, the `x9` CLI, scripts, agent
+(AI agents via the MCP server, the web UI, the `x9` CLI, scripts, agent
 frameworks calling operations as functions) uses this API, and the rules live
 here, not in any client.
 
@@ -58,7 +58,7 @@ Rule settings are readable at `GET /rules` (admin can change them later; not in 
 | `operator` | yes | yes | yes | yes | yes, with `X-Confirm` |
 | `admin` | yes | yes | yes | yes | yes, with `X-Confirm` |
 
-An AI agent gets an `agent` token. A person on the phone gets `operator`. So
+An AI agent gets an `agent` token. A person in the web UI gets `operator`. So
 a typical session is: the person grants "up to 12 scans in this project for
 two hours", and the agent works inside that.
 
@@ -81,7 +81,7 @@ two hours", and the agent works inside that.
   returned as an image so the agent can look and draw the box, and the
   `run_recipe` prompt. It holds an `agent` token and enforces nothing itself;
   its old launch checks (idle, mode, echo) now live here.
-- **Phone web UI:** status, approvals and grants, recipe runs as checklists,
+- **Web UI:** status, approvals and grants, recipe runs as checklists,
   evidence images. Holds an `operator` token.
 - **`x9` CLI:** thin subcommands over the same operations.
 - **Other agent frameworks:** generate function definitions from this spec.
@@ -185,6 +185,6 @@ person step, `waiting_for: input`. Cancelling a run cancels its scan in flight.
 
 ## Next
 
-1. A minimal phone web UI: status, approvals, runs as checklists.
+1. A minimal web UI: status, approvals, runs as checklists.
 2. The measurement worker, so the window recipe's last step is automatic.
 3. Run the bridge on the Pi (aarch64 build).

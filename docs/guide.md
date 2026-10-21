@@ -200,7 +200,7 @@ The token file has one token per line:
 
 ```text
 # name    role      token
-phone     operator  4f1c0d8e9b2a7f3c5e6d1a0b9c8d7e6f
+crew      operator  4f1c0d8e9b2a7f3c5e6d1a0b9c8d7e6f
 agent-1   agent     9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d
 wall      viewer    0123456789abcdef0123456789abcdef
 ```
@@ -247,7 +247,7 @@ valid token; a missing or unknown token gets `401 unauthorized`.
 `admin` has exactly the rights of `operator` in this version. Changing rules
 and tokens over the API is not implemented.
 
-A typical setup: an AI agent gets an `agent` token, a person on the phone gets
+A typical setup: an AI agent gets an `agent` token, the person in the web UI gets
 an `operator` token. The person grants "up to 12 scans in this project for two
 hours", and the agent works inside that.
 
@@ -353,7 +353,7 @@ curl -s -H "$H" -d "{\"project_id\":\"$PROJECT\",\"kind\":\"full_dome\",\"mode\"
 
 ```json
 {"job_id": "job_3f9a1c2b7d4e", "kind": "scan", "state": "queued",
- "requested_by": "phone", "run_id": null, "created_at": "2026-10-20T12:01:00Z",
+ "requested_by": "crew", "run_id": null, "created_at": "2026-10-20T12:01:00Z",
  "started_at": null, "finished_at": null}
 ```
 
@@ -505,7 +505,7 @@ curl -s -H "$H" -d "{\"project_id\":\"$PROJECT\",\"expires_at\":\"2026-10-20T16:
 ```json
 {"project_id": "<uuid>", "expires_at": "2026-10-20T16:00:00Z", "max_scans": 12,
  "allowed_modes": ["STD_L0", "STD_L2"], "allow_color": false, "run_id": null,
- "grant_id": "grant_8c1d2e3f4a5b", "granted_by": "phone", "scans_used": 0}
+ "grant_id": "grant_8c1d2e3f4a5b", "granted_by": "crew", "scans_used": 0}
 ```
 
 | Field | Required | What |
@@ -860,7 +860,7 @@ itself; people and agents add notes.
 ```bash
 curl -s -H "$H" "$B/log?project_id=$PROJECT&since=2026-10-20T12:00:00Z"
 curl -s -H "$H" -d "{\"text\":\"Moved the plant out of the way\",\"project_id\":\"$PROJECT\"}" $B/log
-# 201 {"entry_id":"log_…","at":"…","kind":"note","text":"…","author":"phone","project_id":"…","refs":{}}
+# 201 {"entry_id":"log_…","at":"…","kind":"note","text":"…","author":"crew","project_id":"…","refs":{}}
 ```
 
 - `GET /log` returns entries oldest first. `since` (RFC 3339) keeps entries
@@ -907,7 +907,7 @@ another agent gets `403 forbidden`.
 ## Web UI
 
 The bridge serves a small web app at `/ui/` (and redirects `/` there): the
-same API, for a person in the field on a laptop (or a phone). It is built into the
+same API, for the person in the field on the laptop (a tablet or phone works too). It is built into the
 `x9-bridge` binary, needs no internet, and loads nothing from anywhere else.
 
 ### Reaching it
@@ -933,7 +933,7 @@ one.
 Paste a token from the token file, or open a link with the token in it:
 `http://<bridge>:8795/ui/?token=<token>` (for example from a QR code). The
 token is kept in the browser (`localStorage`) and removed from the address bar.
-The header shows who you are signed in as; tap it to sign out. The role
+The header shows who you are signed in as; click it to sign out. The role
 decides what the app offers, exactly as in [Roles](#roles): a `viewer` only
 looks; an `agent`'s scans wait for approval; an `operator` approves, denies,
 stops and deletes.
@@ -954,7 +954,7 @@ Things to know:
   polls `GET /status` every 5 s. The header dot says whether the stream is
   connected; it reconnects on its own.
 - Drawing a box: "Draw box" (the default) turns a drag on the preview into a
-  box; switch to "Pan" to scroll a wide panorama with a finger. The panorama
+  box; switch to "Pan" to scroll a wide panorama. The panorama
   repeats after its end, so a box can cross the seam (sent as `x1 < x0`). A
   proposed box opens in Pan, scrolled into view.
 - It asks before stopping a scan, cancelling a run or deleting a scan.

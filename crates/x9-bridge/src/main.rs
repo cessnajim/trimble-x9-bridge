@@ -1,5 +1,5 @@
 //! x9-bridge — the one service that talks to the X9. Every client (MCP agents,
-//! the phone web UI, the `x9` CLI, scripts) uses its HTTP API
+//! the web UI, the `x9` CLI, scripts) uses its HTTP API
 //! (`api/bridge-v1.openapi.yaml`), and the rules live here.
 //!
 //! Environment:

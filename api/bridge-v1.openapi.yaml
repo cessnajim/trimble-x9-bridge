@@ -6,7 +6,7 @@ info:
   description: |
     The bridge service runs next to the scanner (a Pi on the tripod or a desk
     machine) and is the only thing that talks to it. Every client goes through
-    this API: AI agents via the MCP server, the phone web UI, the `x9` CLI,
+    this API: AI agents via the MCP server, the web UI, the `x9` CLI,
     scripts, and agent frameworks calling these operations as functions.
     Clients enforce nothing; the rules (busy, moved, battery, queue,
     approvals) live here.

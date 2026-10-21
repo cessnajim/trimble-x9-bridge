@@ -34,7 +34,7 @@ trademarks of their respective owners.
 - **Measurements:** a window's finished opening from a close-up, with an
   uncertainty, checks and an evidence image, as a job or a recipe step.
 - **Proposals:** the agent answers a person step (finds the window, measures it)
-  and a person confirms it with one tap.
+  and a person confirms it with one click.
 - **Web UI** at `/ui/`: approvals, live progress, recipe runs with box
   drawing on previews, aiming, exports, the log, and a 3D point viewer with
   the coverage overlay that follows each new scan while you are still on site.
