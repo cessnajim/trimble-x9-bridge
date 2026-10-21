@@ -540,7 +540,8 @@ paths:
       summary: Measure a feature in a scan (a `measure` job).
       description: |
         `kind: opening` measures a window's finished opening (the hole in the
-        wall face) from a levelled close-up with wall on every side. Any role
+        wall face) from a levelled close-up with wall on every side, or, with
+        `box`, from the part of any scan (a full dome) inside that preview box. Any role
         but `viewer`. The job's phases are `downloading` and `measuring`; its
         result is `{measurement_id}`.
       requestBody:
@@ -1282,15 +1283,24 @@ components:
           type: string
           enum: [opening]
           description: v1 measures one thing well; more kinds come later.
-        hint_box:
+        box:
           type: object
-          x-status: planned
-          description: Planned; ignored today. Optional preview box around the feature (same form as `AimRequest.box`).
+          description: >-
+            Measure only this box on the scan's preview (pixels, y down; `x1 < x0`
+            wraps across the seam), padded by `margin_rad`: a window in a full
+            dome, without a close-up. Same form as `AimRequest.box`. The result
+            gains `crop` (`box`, `margin_rad`, grid `rows` and `cols`, `points`,
+            `angle_step_mrad`). A box outside the preview, or with y0 >= y1, fails
+            the job with `measure_failed`.
           properties:
             x0: { type: integer }
             y0: { type: integer }
             x1: { type: integer }
             y1: { type: integer }
+        margin_rad:
+          type: number
+          default: 0.017
+          description: Padding around `box` on every side, radians (the window recipe pads its close-ups the same).
         avoid:
           type: array
           x-status: planned

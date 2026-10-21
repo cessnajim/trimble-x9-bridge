@@ -500,7 +500,39 @@ pub fn echo_mismatch(sent: &serde_json::Value, echo: &serde_json::Value) -> Vec<
 
 /// Measure a scan (blocking work off the runtime): download its file, decode
 /// levelled points, find the opening, store the measurement and evidence.
-pub async fn run_measure(st: Arc<AppState>, job_id: String, scan_id: String) {
+/// Grid cells inside a preview box (pixels, y down; `x1 < x0` wraps across the
+/// seam), padded by `margin` radians: rows `r0..=r1`, columns `c0..=c1`
+/// (wrapping when `c1 < c0`).
+pub struct Cells {
+    pub r0: u32,
+    pub r1: u32,
+    pub c0: u32,
+    pub c1: u32,
+}
+
+impl Cells {
+    pub fn contains(&self, r: u32, c: u32) -> bool {
+        r >= self.r0 && r <= self.r1 && if self.c0 <= self.c1 { c >= self.c0 && c <= self.c1 } else { c >= self.c0 || c <= self.c1 }
+    }
+}
+
+pub fn crop_cells(m: &trimble_tzf::ScanMeta, pw: usize, ph: usize, b: [i64; 4], margin: f64) -> Result<Cells, String> {
+    let [x0, y0, x1, y1] = b;
+    if !(0..=pw as i64).contains(&x0) || !(0..=pw as i64).contains(&x1) || !(0 <= y0 && y0 < y1 && y1 <= ph as i64) || x0 == x1 {
+        return Err(format!("box must lie within the {pw}x{ph} preview, with y0 < y1 and some width"));
+    }
+    let (cols, rows) = (m.grid_cols as i64, m.grid_rows as i64);
+    let (sx, sy) = (cols as f64 / pw as f64, rows as f64 / ph as f64);
+    let pad_c = (margin / m.angle_step_rad[0].abs().max(1e-9)).round() as i64;
+    let pad_r = (margin / m.angle_step_rad[1].abs().max(1e-9)).round() as i64;
+    let r0 = ((y0 as f64 * sy) as i64 - pad_r).clamp(0, rows - 1) as u32;
+    let r1 = ((y1 as f64 * sy) as i64 + pad_r).clamp(0, rows - 1) as u32;
+    let c0 = ((x0 as f64 * sx) as i64 - pad_c).rem_euclid(cols) as u32;
+    let c1 = ((x1 as f64 * sx) as i64 + pad_c).rem_euclid(cols) as u32;
+    Ok(Cells { r0, r1, c0, c1 })
+}
+
+pub async fn run_measure(st: Arc<AppState>, job_id: String, scan_id: String, crop: Option<([i64; 4], f64)>) {
     use crate::files::{scan_file, FileKind};
     let cancelled = |st: &AppState| finish(st, &job_id, JobState::Cancelled, None, None);
     let tzf = match unless_cancelled(&st, &job_id, scan_file(&st, &scan_id, FileKind::Tzf)).await {
@@ -508,20 +540,44 @@ pub async fn run_measure(st: Arc<AppState>, job_id: String, scan_id: String) {
         Some(Ok(p)) => p,
         Some(Err(e)) => return finish(&st, &job_id, JobState::Failed, None, Some(&e)),
     };
+    // A crop is a box on the preview: its size maps the box onto the scan grid.
+    let preview_size = match crop {
+        None => None,
+        Some(_) => match unless_cancelled(&st, &job_id, scan_file(&st, &scan_id, FileKind::Preview)).await {
+            None => return cancelled(&st),
+            Some(Ok(p)) => match tokio::fs::read(&p).await.map_err(|e| e.to_string()).and_then(|b| crate::aim::jpeg_size(&b)) {
+                Ok(wh) => Some(wh),
+                Err(e) => return finish(&st, &job_id, JobState::Failed, None, Some(&ApiError::invalid(format!("preview: {e}")))),
+            },
+            Some(Err(e)) => return finish(&st, &job_id, JobState::Failed, None, Some(&e)),
+        },
+    };
     if update(&st, &job_id, |r| r.job.phase = Some("measuring".into())) {
         return cancelled(&st);
     }
     let (st2, job2) = (st.clone(), job_id.clone());
     let res = tokio::task::spawn_blocking(move || -> Result<(serde_json::Value, Vec<u8>), String> {
         let t = trimble_tzf::Tzf::open(&tzf).map_err(|e| format!("open: {e}"))?;
+        let meta = t.scan_meta().map_err(|e| format!("metadata: {e}"))?;
         let pts = t.grid_points().map_err(|e| format!("decode: {e}"))?;
         if cancel_requested(&st2, &job2) {
             return Err("cancelled".into());
         }
-        let xyz: Vec<[f64; 3]> = pts.iter().map(|p| [p.point.x as f64, p.point.y as f64, p.point.z as f64]).collect();
+        let cells = match (crop, preview_size) {
+            (Some((b, margin)), Some((pw, ph))) => Some(crop_cells(&meta, pw, ph, b, margin)?),
+            _ => None,
+        };
+        let keep = |p: &trimble_tzf::GridPoint| cells.as_ref().is_none_or(|c| c.contains(p.row, p.col));
+        let xyz: Vec<[f64; 3]> = pts.iter().filter(|p| keep(p)).map(|p| [p.point.x as f64, p.point.y as f64, p.point.z as f64]).collect();
         drop(pts);
         let o = crate::measure::opening(&xyz)?;
-        Ok(crate::measure::report(&o))
+        let (mut v, png) = crate::measure::report(&o);
+        if let (Some(c), Some((b, margin))) = (&cells, crop) {
+            v["crop"] = serde_json::json!({"box": {"x0": b[0], "y0": b[1], "x1": b[2], "y1": b[3]}, "margin_rad": margin,
+                                           "rows": [c.r0, c.r1], "cols": [c.c0, c.c1], "points": xyz.len(),
+                                           "angle_step_mrad": (meta.angle_step_rad[0].abs().max(meta.angle_step_rad[1].abs()) * 1e4).round() / 10.0});
+        }
+        Ok((v, png))
     })
     .await;
     if cancel_requested(&st, &job_id) {

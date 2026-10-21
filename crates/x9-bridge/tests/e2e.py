@@ -309,6 +309,23 @@ try:
         check("area coverage builds too", s == 200, s)
         s, b = call("GET", f"/scans/{uuid.uuid4()}/view", "viewer")
         check("view of a scan the scanner doesn't list is 404", s == 404, (s, b))
+        # A window measured straight from the full dome, cropped to the box that framed it.
+        def measure(body):
+            s, j = call("POST", f"/scans/{station_scan}/measurements", "agent", body)
+            if s != 202:
+                return s, j
+            j = wait_job(j["job_id"], ("succeeded", "failed"), timeout=120)
+            if j["state"] != "succeeded":
+                return 0, j
+            return call("GET", f"/measurements/{j['result']['measurement_id']}", "viewer")
+        s, m = measure({"kind": "opening", "box": {"x0": 523, "y0": 418, "x1": 674, "y1": 564}})
+        check("a window measured from the full dome by a box: within 10 mm of the close-up (1185 x 1150), all checks pass",
+              s == 200 and abs(m["opening_width_mm"] - 1185) <= 10 and abs(m["opening_height_mm"] - 1150) <= 10
+              and all(c["ok"] for c in m["checks"]) and m["crop"]["box"]["x0"] == 523 and m["crop"]["margin_rad"] == 0.017
+              and 50_000 < m["crop"]["points"] < 200_000, m)
+        s, j = measure({"kind": "opening", "box": {"x0": 523, "y0": 564, "x1": 674, "y1": 418}})
+        check("a box with y0 > y1 fails the measurement with measure_failed", s == 0 and j["state"] == "failed"
+              and j["problem"]["code"] == "measure_failed" and "y0 < y1" in j["problem"]["detail"], j)
     # --- recipes and runs ---
     s, rl = call("GET", "/recipes", "viewer")
     check("recipes listed, the broken one skipped", s == 200 and sorted(r["recipe_id"] for r in rl) == ["log-note", "window-measurement"], rl)

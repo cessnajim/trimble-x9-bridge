@@ -769,6 +769,27 @@ opening); it needs wall visible on all four sides; a measurement is kept in
 memory until the bridge restarts, its evidence image on disk; deleting the
 scan deletes its measurements.
 
+**Without a close-up.** Add the box that frames the window on the scan's
+preview, and the bridge measures only that part of the scan, padded by
+`margin_rad` (default 0.017 rad, the same padding the window recipe gives its
+close-ups):
+
+```bash
+curl -s -H "$H" -d '{"kind":"opening","box":{"x0":523,"y0":418,"x1":674,"y1":564}}' $B/scans/$DOME/measurements
+```
+
+The preview is grid-aligned, so the box maps straight onto the scan's rows and
+columns. On the 2026-10-19 full dome (STD_L0, 1.5 mrad, the window 3.1 m
+away, about 4.6 mm between points) this gave 1190 × 1155 mm, against
+1185 × 1150 mm from that window's STD_L2 close-up: one 5 mm cell apart, all
+checks passing, from about 100,000 points. So one full dome can serve every
+window seen from the station, without a close-up each; spacing grows with
+distance (range × angular step), so far windows still want a close-up.
+Exterior windows do not measure yet, with or without a close-up: on a 2024
+house survey, trim proud of the siding, board-and-batten siding and bushes
+broke the wall-face model, and the checks failed every result (they were not
+reported as measurements).
+
 ### View points and coverage
 
 Three read-only endpoints, for a viewer and for an agent deciding whether a

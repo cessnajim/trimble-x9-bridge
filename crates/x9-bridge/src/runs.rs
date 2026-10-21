@@ -447,7 +447,7 @@ async fn action(st: &Arc<AppState>, run_id: &str, i: usize, step: &RecipeStep, c
             let project_id = ctx["project_id"].as_str().unwrap_or("").to_string();
             let mut attempts = Vec::new();
             loop {
-                let job = submit_measure(st, caller, scan_id.clone(), MeasureRequest { kind: "opening".into() }, Some(run_id)).await?;
+                let job = submit_measure(st, caller, scan_id.clone(), MeasureRequest::opening(), Some(run_id)).await?;
                 let job = wait_job(st, run_id, i, &job.job_id).await?;
                 let id = job.result.as_ref().and_then(|r| r.get("measurement_id")).and_then(Value::as_str).unwrap_or("").to_string();
                 let mut m = st.inner.lock().unwrap().measurements.get(&id).cloned().ok_or_else(|| ApiError::not_found("measurement"))?;

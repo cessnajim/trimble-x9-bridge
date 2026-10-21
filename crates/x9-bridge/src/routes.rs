@@ -494,12 +494,12 @@ fn default_margin() -> f64 {
     0.009
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize, Clone, Copy)]
 pub struct AimBox {
-    x0: i64,
-    y0: i64,
-    x1: i64,
-    y1: i64,
+    pub x0: i64,
+    pub y0: i64,
+    pub x1: i64,
+    pub y1: i64,
 }
 
 #[derive(Deserialize)]
@@ -589,6 +589,23 @@ pub async fn submit_export(st: &Arc<AppState>, c: &crate::model::Caller, scan_id
 #[derive(Debug, Clone, Deserialize)]
 pub struct MeasureRequest {
     pub kind: String,
+    /// Measure only this box on the scan's preview (pixels, y down; `x1 < x0`
+    /// wraps across the seam), padded by `margin_rad`: a window in a full
+    /// dome, without a close-up.
+    #[serde(default, rename = "box")]
+    pub crop: Option<AimBox>,
+    #[serde(default = "default_crop_margin")]
+    pub margin_rad: f64,
+}
+
+fn default_crop_margin() -> f64 {
+    0.017
+}
+
+impl MeasureRequest {
+    pub fn opening() -> Self {
+        MeasureRequest { kind: "opening".into(), crop: None, margin_rad: default_crop_margin() }
+    }
 }
 
 async fn start_measurement(State(st): St, h: HeaderMap, Path(scan_id): Path<String>, body: Bytes) -> ApiResult<Response> {
@@ -634,7 +651,8 @@ pub async fn submit_measure(st: &Arc<AppState>, c: &crate::model::Caller, scan_i
     });
     st.log("measure", format!("Opening measurement of scan {scan_id} requested"), &c.name, Some(&project_id), &[("job_id", &job.job_id), ("scan_id", &scan_id)]);
     st.emit_job(&job);
-    tokio::spawn(crate::worker::run_measure(st.clone(), job.job_id.clone(), scan_id));
+    let crop = req.crop.map(|b| ([b.x0, b.y0, b.x1, b.y1], req.margin_rad.max(0.0)));
+    tokio::spawn(crate::worker::run_measure(st.clone(), job.job_id.clone(), scan_id, crop));
     Ok(job)
 }
 
