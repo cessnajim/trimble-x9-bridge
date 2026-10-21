@@ -29,6 +29,11 @@ trademarks of their respective owners.
   criteria and a ledger of targets (each facade, each window): covered,
   measured or declined. "Ready to leave" is refused while anything is open;
   the person signs the job off once. Saved across restarts.
+- **Registration:** after every full dome the bridge brings the station
+  into the project frame by itself (4-DOF: the X9 levels its scans), adjusts
+  all stations together so loops close, finds the walls in the merged plan,
+  and judges how much of any wall face has been seen. Mission targets on
+  walls are then covered by geometry, not by eye.
 - **Next-station proposals:** the agent marks where to set up next on the
   station's preview (a tripod on the ground, labels for what was seen and
   what is hidden, landmarks to walk by) with directions in prose; the bridge

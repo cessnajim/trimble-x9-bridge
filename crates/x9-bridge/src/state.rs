@@ -54,6 +54,14 @@ pub struct Inner {
     pub next_stations: HashMap<String, (Value, Vec<u8>)>,
     /// Each project's mission (what the job is for, and its ledger).
     pub missions: HashMap<String, crate::mission::Mission>,
+    /// Each project's registration (`registrations.json`).
+    pub registrations: HashMap<String, crate::register::Registration>,
+    /// Each registered project's merged wall points, loaded on first use.
+    pub merged: HashMap<String, std::sync::Arc<crate::register::Merged>>,
+    /// Projects with a registration job running (its job id), and those whose
+    /// job should run once more when it ends (a station landed meanwhile).
+    pub registering: HashMap<String, String>,
+    pub register_again: HashSet<String>,
     pub runs: HashMap<String, crate::runs::RunRecord>,
     /// Scanner tasks the bridge cancelled that may still be listed in `/tasks`.
     pub cancelled_tasks: HashSet<i64>,
@@ -187,6 +195,63 @@ impl AppState {
         if let Err(e) = res {
             let _ = std::fs::remove_file(&tmp);
             self.log("error", format!("Could not save missions: {e}"), "bridge", None, &[]);
+        }
+    }
+
+    /// Write the registrations to `registrations.json` (after every change).
+    pub fn save_registrations(&self) {
+        let rs: Vec<crate::register::Registration> = self.inner.lock().unwrap().registrations.values().cloned().collect();
+        let path = self.data_dir.join("registrations.json");
+        let tmp = path.with_extension(format!("json.{}", new_id("tmp")));
+        let res = serde_json::to_vec(&rs)
+            .map_err(std::io::Error::other)
+            .and_then(|b| std::fs::write(&tmp, b))
+            .and_then(|_| std::fs::rename(&tmp, &path));
+        if let Err(e) = res {
+            let _ = std::fs::remove_file(&tmp);
+            self.log("error", format!("Could not save registrations: {e}"), "bridge", None, &[]);
+        }
+    }
+
+    /// Load the registrations saved before a restart. Returns how many.
+    pub fn load_registrations(&self) -> usize {
+        let Ok(bytes) = std::fs::read(self.data_dir.join("registrations.json")) else { return 0 };
+        match serde_json::from_slice::<Vec<crate::register::Registration>>(&bytes) {
+            Ok(rs) => {
+                let n = rs.len();
+                self.inner.lock().unwrap().registrations = rs.into_iter().map(|r| (r.project_id.clone(), r)).collect();
+                n
+            }
+            Err(e) => {
+                self.log("error", format!("Ignoring registrations.json: {e}"), "bridge", None, &[]);
+                0
+            }
+        }
+    }
+
+    /// Where a project's merged points live.
+    pub fn merged_path(&self, project_id: &str) -> Option<std::path::PathBuf> {
+        let ok = !project_id.is_empty() && project_id.len() <= 128 && project_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        ok.then(|| self.data_dir.join("registration").join(format!("{project_id}.merged")))
+    }
+
+    /// The project's merged wall points (from disk on first use).
+    pub fn merged(&self, project_id: &str) -> Option<std::sync::Arc<crate::register::Merged>> {
+        if let Some(m) = self.inner.lock().unwrap().merged.get(project_id) {
+            return Some(m.clone());
+        }
+        let bytes = std::fs::read(self.merged_path(project_id)?).ok()?;
+        let m = std::sync::Arc::new(crate::register::Merged::from_bytes(&bytes).ok()?);
+        self.inner.lock().unwrap().merged.insert(project_id.to_string(), m.clone());
+        Some(m)
+    }
+
+    /// The registration as missions use it (empty when not registered).
+    pub fn geo(&self, project_id: &str) -> crate::register::Geo {
+        let reg = self.inner.lock().unwrap().registrations.get(project_id).cloned();
+        match reg {
+            None => crate::register::Geo::none(),
+            Some(r) => crate::register::Geo { scans: r.station_scans(), walls: r.walls, merged: self.merged(project_id) },
         }
     }
 

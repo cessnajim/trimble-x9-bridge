@@ -52,6 +52,8 @@ const S = {
   nextStations: [], // the agent's next-station proposals, newest first
   missions: [],     // each project's mission, newest first
   nsImages: new Map(), // scan_id|at -> object URL | "loading" | {error}
+  regs: {},            // project_id -> registration (null while loading)
+  regImages: new Map(), // project|updated|ledger -> object URL | "loading" | {error}
   evidence: new Map(), // measurement_id -> object URL | "loading" | {error}
   watchMeasure: {}, // scan_id -> job_id
   watchExport: {}, // scan_id -> job_id
@@ -265,7 +267,7 @@ function missionCard(m) {
   const rows = m.targets.map((t) => {
     const [cls, word] = TARGET_CHIP[t.status] ?? ["", t.status];
     return `<li><span class="chip ${cls}">${esc(word)}</span><div class="grow"><strong>${esc(t.name)}</strong>
-      <div class="meta">${esc(t.kind)}${t.stations.length ? ` · ${t.stations.length} station${t.stations.length === 1 ? "" : "s"}` : ""}${t.note ? ` · ${esc(t.note)}` : ""}</div></div></li>`;
+      <div class="meta">${esc(t.kind)}${t.stations.length ? ` · ${t.stations.length} station${t.stations.length === 1 ? "" : "s"}` : ""}${t.geometry?.seen_share !== undefined ? ` · ${Math.round(t.geometry.seen_share * 100)}% of its length seen` : ""}${t.note ? ` · ${esc(t.note)}` : ""}</div></div></li>`;
   }).join("");
   const n = (s) => m.targets.filter((t) => t.status === s).length;
   const tally = ["covered", "measured", "declined", "open"].filter((s) => n(s)).map((s) => `${n(s)} ${s}`).join(" · ") || "no targets yet";
@@ -274,10 +276,39 @@ function missionCard(m) {
     <div class="meta">Done when: ${esc(m.done_when)}</div>
     <div class="meta">${esc(tally)}</div>
     ${rows ? `<ul class="ledger">${rows}</ul>` : ""}
+    ${regPlan(m)}
     ${m.state === "ready" ? `<div class="note">${esc(m.ready_summary ?? "")}</div>
       ${isOp() ? `<button class="btn good wide" data-act="mission-sign-off" data-id="${esc(m.project_id)}" ${S.busy ? "disabled" : ""}>Sign off the job</button>` : `<p class="hint">Waiting for an operator to sign it off.</p>`}` : ""}
     ${m.state === "signed_off" ? `<div class="meta">Signed off by ${esc(m.signed_off_by)} · ${esc(ago(m.signed_off_at))}${m.confirmed_via ? ` · ${esc(m.confirmed_via)}` : ""}</div>` : ""}
   </div>`;
+}
+
+// The registered plan under the ledger: every station in one frame, walls,
+// and the mission's wall faces coloured by status.
+function regPlan(m) {
+  const id = m.project_id;
+  if (!(id in S.regs)) {
+    S.regs[id] = null;
+    api(`/projects/${encodeURIComponent(id)}/registration`).then((v) => { S.regs[id] = v; }).catch(() => {}).finally(() => render());
+    return "";
+  }
+  const r = S.regs[id];
+  if (!r?.stations?.some((s) => s.placed)) return "";
+  const key = `${id}|${r.updated_at}|${m.targets.map((t) => t.status).join()}`;
+  let img = S.regImages.get(key);
+  if (!img) {
+    S.regImages.set(key, "loading");
+    api(`/projects/${encodeURIComponent(id)}/registration/plan`, { raw: true })
+      .then((x) => x.blob())
+      .then((b) => S.regImages.set(key, URL.createObjectURL(b)))
+      .catch((e) => S.regImages.set(key, { error: e.message }))
+      .finally(() => render());
+    img = "loading";
+  }
+  const pic = img === "loading" ? `<div class="placeholder small">Loading the plan…</div>`
+    : img?.error ? `<div class="problem">${esc(img.error)}</div>`
+    : `<a href="${esc(img)}" target="_blank" rel="noopener" title="Open full size"><img class="nextstation" src="${esc(img)}" alt="Plan of the registered stations, walls and the mission's wall faces"></a>`;
+  return `<div class="meta">${esc(r.summary)}</div>${pic}`;
 }
 
 // The agent's proposal for where to set up next: the picture and its directions.
@@ -361,6 +392,8 @@ function onEvent(chunk) {
     }
   } else if (kind === "mission") {
     S.missions = [v, ...S.missions.filter((m) => m.project_id !== v.project_id)];
+  } else if (kind === "registration") {
+    S.regs[v.project_id] = v;
   } else if (kind === "next_station") {
     S.nextStations = [v, ...S.nextStations.filter((p) => p.scan_id !== v.scan_id)];
   } else if (kind === "run") {

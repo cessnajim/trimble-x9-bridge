@@ -199,6 +199,11 @@ pub fn build(pts: &[GridPoint], meta: &ScanMeta, grey: &dyn Fn(&GridPoint) -> u8
     Built { view, coverage, image }
 }
 
+/// The plan colour of a spacing class (0 fine … 3 sparse).
+pub fn class_colour(class: u8) -> [u8; 3] {
+    COLOURS[(SEEN_BASE + (CLASSES.len() as u8 - 1 - class.min(3))) as usize]
+}
+
 /// Plan colours by cell code: nothing, shadow, sparse, coarse, good, fine.
 const COLOURS: [[u8; 3]; 6] = [[17, 24, 39], [215, 48, 39], [252, 141, 89], [254, 224, 139], [145, 207, 96], [26, 152, 80]];
 

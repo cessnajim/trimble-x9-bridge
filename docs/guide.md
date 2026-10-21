@@ -868,12 +868,52 @@ curl -s -X POST -H "$OPERATOR" -d '{"confirmed_via":"web UI"}' $B/projects/$PROJ
 | Targets | Upserted by `target_id` (letters, digits, `-`, `_`), up to 200. `status` `open`, `covered` (names its scans, which must be in the project), `measured` (also a `measurement_id`) or `declined` (says why in `note`) |
 | Ready | `POST …/ready` with a summary: `409 conflict` while any target is open, naming them; refused on an empty ledger. A later change to the ledger sends the mission back to active |
 | Sign-off | `POST …/sign-off`, operator only, optional `confirmed_via` (how the person said it). The mission is then done: further changes are `409` |
+| Wall faces | A target may name a wall: `wall_id` (from the registration) or `face` `{from, to}` (project frame, m). Once the project is registered the bridge judges it and keeps `geometry`: an open face seen over 80% of its length becomes `covered` with the stations that saw it; `covered` is refused (`400`) while less is seen. After every registration the faces are judged again (a ready mission whose face opens goes back to active) |
 
 Every change is announced as a `mission` event and saved to
 `missions.json` in the data directory, so a restart keeps the job. The field
 log gets the mission, "Ready to leave" and the sign-off with its tally. The
 web UI shows the mission and its ledger at the top of Now, with **Sign off
 the job** for operators when it is ready.
+
+### Registration: every station in one frame
+
+After each full dome the bridge registers the project's stations by itself
+(a `register` job, requested by `bridge`): the new station is decoded once
+into a 5 cm cloud (kept in `registration/` in the data directory), searched
+against the placed station nearest in number (wall slices as plan images,
+every turn in 1° steps, the shift by FFT correlation, then point-to-plane
+ICP), and matched to every other placed station within reach from the pose
+that predicts (ICP only). All stations are then adjusted together with a
+robust loss, so loops close and one wrong pair can't drag the rest. The X9
+levels every scan, so a pose is a turn about vertical and x, y, z.
+
+```bash
+curl -s -H "$H" $B/projects/$PROJECT/registration            # stations, pairs, walls, summary
+curl -s -H "$H" $B/projects/$PROJECT/registration/plan -o plan.png
+curl -s -X POST -H "$H" -d '{"wall_id":"w3"}' $B/projects/$PROJECT/registration/face
+curl -s -X POST -H "$H" $B/projects/$PROJECT/registration     # register again (202, a job)
+```
+
+| Part | What it holds |
+| --- | --- |
+| Frame | The first station's scanner: x and y as it happened to face (not north), z up, metres. Describe places to people by landmarks and station numbers |
+| Stations | `placed`, `turn_deg`, `xyz_m`. A station that won't place shares too little wall with the placed ones; the field log says so and what to do |
+| Pairs | Those that fit (RMS under 15 mm over at least 8000 flat matches), with `left_mm`: how far the global fit left them from their own fit. Small numbers around a loop mean the loop closed |
+| Walls | Straight runs in the merged plan (points spanning at least 0.5 m of height), longest first: `wall_id`, `from`, `to`, `length_m`, `z_m`, `seen_by` (station numbers). Ids are renumbered on each registration |
+| Faces | `POST …/face` with a `wall_id` or `from`/`to`: `seen_share` of its length (0.5 m columns with at least 1 m of wall in points; windows leave the wall around them), `spacing_mm`, the stations that saw it and the `unseen` stretches. `covered` at 80% |
+
+Registration runs one at a time per project; a station that lands while one
+runs makes it run once more. Each result is announced as a `registration`
+event and saved to `registrations.json`, so a restart keeps it. On the
+a recorded 12-station survey around a house, every station places, the
+pairs agree within 9 mm after the global fit, and a station takes about
+35 s on a Raspberry Pi 4 (9 s decoding, 23 s searching, a second or two per
+further pair). `x9-bridge register OUT_DIR a.tzf b.tzf …` runs the same
+registration on scan files offline, with timings.
+
+Mission targets on walls use it: give a facade target a `wall_id` (or a
+`face`) and the bridge judges it (below).
 
 ### Propose the next station
 

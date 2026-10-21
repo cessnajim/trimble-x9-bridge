@@ -4,7 +4,7 @@
 //! (scan file appears) → imaging if color → done.
 
 use crate::map::parse_file;
-use crate::model::{JobState, ScanKind, Timings};
+use crate::model::{Job, JobState, ScanKind, Timings};
 use crate::problem::ApiError;
 use crate::rules::preflight;
 use crate::state::{AppState, ScanMeta};
@@ -86,7 +86,7 @@ fn finish(st: &AppState, job_id: &str, state: JobState, result: Option<serde_jso
     st.log(kind, format!("{label} job {job_id} {verb}"), "bridge", project_id.as_deref(), &[("job_id", job_id)]);
 }
 
-async fn run_scan(st: &AppState, job_id: &str) {
+async fn run_scan(st: &Arc<AppState>, job_id: &str) {
     let (req, project_name) = {
         let inner = st.inner.lock().unwrap();
         let Some(rec) = inner.jobs.iter().find(|j| j.job.job_id == job_id) else { return };
@@ -254,6 +254,254 @@ async fn run_scan(st: &AppState, job_id: &str) {
     };
     st.inner.lock().unwrap().scan_meta.insert(scan_id.clone(), ScanMeta { created_at, timings, window: req.window });
     finish(st, job_id, JobState::Succeeded, Some(serde_json::json!({"scan_id": scan_id})), None);
+    // A new station: bring it into the project frame.
+    if req.kind == ScanKind::FullDome {
+        queue_register(st, &req.project_id, "bridge");
+    }
+}
+
+/// Register the project's stations (see `register`), or, while a
+/// registration runs, have it run once more when it ends. Returns its job.
+pub fn queue_register(st: &Arc<AppState>, project_id: &str, by: &str) -> Job {
+    let job = {
+        let mut inner = st.inner.lock().unwrap();
+        if let Some(running) = inner.registering.get(project_id).cloned() {
+            inner.register_again.insert(project_id.to_string());
+            if let Some(j) = inner.jobs.iter().find(|j| j.job.job_id == running) {
+                return j.job.clone();
+            }
+        }
+        let now = now_rfc3339();
+        let job = Job {
+            job_id: crate::util::new_id("job"),
+            kind: "register".into(),
+            state: JobState::Running,
+            phase: Some("listing stations".into()),
+            progress: None,
+            requested_by: by.to_string(),
+            run_id: None,
+            created_at: now.clone(),
+            started_at: Some(now),
+            finished_at: None,
+            result: None,
+            problem: None,
+            partial_scan_id: None,
+            request: None,
+            project_name: None,
+        };
+        inner.jobs.push(crate::state::JobRecord {
+            job: job.clone(),
+            request: None,
+            project_id: project_id.to_string(),
+            project_name: String::new(),
+            scanner_task_id: None,
+            cancel_requested: false,
+            grant_id: None,
+        });
+        inner.registering.insert(project_id.to_string(), job.job_id.clone());
+        job
+    };
+    st.emit_job(&job);
+    tokio::spawn(run_register(st.clone(), job.job_id.clone(), project_id.to_string()));
+    job
+}
+
+async fn run_register(st: Arc<AppState>, job_id: String, project_id: String) {
+    let res = loop {
+        let r = register_once(&st, &job_id, &project_id).await;
+        let again = {
+            let mut inner = st.inner.lock().unwrap();
+            let again = inner.register_again.remove(&project_id) && !cancel_requested_locked(&inner, &job_id);
+            if !again {
+                inner.registering.remove(&project_id);
+            }
+            again
+        };
+        if !again {
+            break r;
+        }
+    };
+    match res {
+        Ok(v) => finish(&st, &job_id, JobState::Succeeded, Some(v), None),
+        Err(None) => finish(&st, &job_id, JobState::Cancelled, None, None),
+        Err(Some(e)) => finish(&st, &job_id, JobState::Failed, None, Some(&e)),
+    }
+}
+
+fn cancel_requested_locked(inner: &crate::state::Inner, job_id: &str) -> bool {
+    inner.jobs.iter().find(|j| j.job.job_id == job_id).is_none_or(|j| j.cancel_requested)
+}
+
+/// One pass: decode stations not seen before into 5 cm clouds (kept on
+/// disk), place every station, merge, find walls, re-judge the mission's
+/// wall faces. `Err(None)`: cancelled.
+async fn register_once(st: &Arc<AppState>, job_id: &str, project_id: &str) -> Result<serde_json::Value, Option<ApiError>> {
+    use crate::files::{scan_file, FileKind};
+    use crate::register::{prepare, register_all, walls, Cloud, Merged, Prepared, Registration, StationPose};
+    let mut stations: Vec<(u16, String)> = crate::routes::all_scans(st)
+        .await
+        .map_err(Some)?
+        .into_iter()
+        .filter(|s| s["project_id"] == project_id && s["kind"] == "full_dome")
+        .filter_map(|s| Some((s["station"].as_u64()? as u16, s["scan_id"].as_str()?.to_string())))
+        .collect();
+    stations.sort();
+    let dir = st.data_dir.join("registration");
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| Some(ApiError::cache(format!("registration directory: {e}"))))?;
+    let mut skipped: Vec<(u16, String)> = Vec::new();
+    let total = stations.len().max(1);
+    for (k, (n, id)) in stations.iter().enumerate() {
+        let path = dir.join(format!("{id}.cloud"));
+        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            continue;
+        }
+        if update(st, job_id, |r| {
+            r.job.phase = Some(format!("decoding station {n}"));
+            r.job.progress = Some(k as f64 / total as f64 * 0.4);
+        }) {
+            return Err(None);
+        }
+        let tzf = match unless_cancelled(st, job_id, scan_file(st, id, FileKind::Tzf)).await {
+            None => return Err(None),
+            Some(Ok(p)) => p,
+            Some(Err(e)) => {
+                skipped.push((*n, e.title.to_string()));
+                continue;
+            }
+        };
+        let res = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+            let t = trimble_tzf::Tzf::open(&tzf).map_err(|e| format!("open: {e}"))?;
+            let meta = t.scan_meta().map_err(|e| format!("metadata: {e}"))?;
+            let pts = t.grid_points().map_err(|e| format!("decode: {e}"))?;
+            Ok(Cloud::from_grid(&pts, crate::view::step_rad(&meta)).to_bytes())
+        })
+        .await;
+        match res {
+            Ok(Ok(bytes)) => {
+                let tmp = path.with_extension(format!("cloud.{}", crate::util::new_id("tmp")));
+                let w = tokio::fs::write(&tmp, &bytes).await.and(tokio::fs::rename(&tmp, &path).await);
+                if let Err(e) = w {
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                    return Err(Some(ApiError::cache(format!("station cloud: {e}"))));
+                }
+            }
+            Ok(Err(e)) => skipped.push((*n, e)),
+            Err(e) => skipped.push((*n, e.to_string())),
+        }
+    }
+    stations.retain(|(n, _)| !skipped.iter().any(|s| s.0 == *n));
+    if update(st, job_id, |r| {
+        r.job.phase = Some("matching".into());
+        r.job.progress = Some(0.4);
+    }) {
+        return Err(None);
+    }
+    let prev = st.inner.lock().unwrap().registrations.get(project_id).cloned();
+    let ids: Vec<String> = stations.iter().map(|s| s.1.clone()).collect();
+    let numbers: Vec<u16> = stations.iter().map(|s| s.0).collect();
+    let pairs0 = prev.as_ref().map(|r| r.pairs.clone()).unwrap_or_default();
+    let (st2, job2, ids2, numbers2) = (st.clone(), job_id.to_string(), ids.clone(), numbers.clone());
+    let out = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        let clouds: Vec<Cloud> = ids2
+            .iter()
+            .map(|id| std::fs::read(dir.join(format!("{id}.cloud"))).map_err(|e| format!("station cloud {id}: {e}")).and_then(|b| Cloud::from_bytes(&b)))
+            .collect::<Result<_, _>>()?;
+        let prep: Vec<Prepared> = clouds.iter().map(prepare).collect();
+        let refs: Vec<&Prepared> = prep.iter().collect();
+        let say = |b: usize, a: usize| {
+            update(&st2, &job2, |r| r.job.phase = Some(format!("matching station {} against {}", numbers2[b], numbers2[a])));
+        };
+        let (pairs, poses) = register_all(&ids2, &refs, pairs0, &say);
+        let mut merged = Merged::default();
+        for (k, p) in poses.iter().enumerate() {
+            if let Some(p) = p {
+                merged.add(&prep[k], clouds[k].step_rad, p, numbers2[k]);
+            }
+        }
+        let ws = walls(&merged);
+        Ok((pairs, poses, merged, ws))
+    })
+    .await;
+    let (pairs, poses, merged, ws) = match out {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => return Err(Some(ApiError::cache(e))),
+        Err(e) => return Err(Some(ApiError::conflict(e.to_string()))),
+    };
+    if cancel_requested(st, job_id) {
+        return Err(None);
+    }
+    let mut reg = Registration {
+        project_id: project_id.to_string(),
+        frame_scan_id: ids.first().cloned(),
+        stations: stations.iter().zip(&poses).map(|((n, id), p)| StationPose { scan_id: id.clone(), station: *n, pose: *p }).collect(),
+        pairs,
+        walls: ws,
+        summary: String::new(),
+        updated_at: now_rfc3339(),
+    };
+    reg.summarise();
+    if let Some(path) = st.merged_path(project_id) {
+        let tmp = path.with_extension(format!("merged.{}", crate::util::new_id("tmp")));
+        let w = tokio::fs::write(&tmp, merged.to_bytes()).await.and(tokio::fs::rename(&tmp, &path).await);
+        if let Err(e) = w {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(Some(ApiError::cache(format!("merged points: {e}"))));
+        }
+    }
+    {
+        let mut inner = st.inner.lock().unwrap();
+        inner.registrations.insert(project_id.to_string(), reg.clone());
+        inner.merged.insert(project_id.to_string(), Arc::new(merged));
+    }
+    st.save_registrations();
+    st.emit("registration", reg.to_json());
+
+    // What changed, for the log: newly placed stations, and any that won't place.
+    let was_placed = |id: &str| prev.as_ref().is_some_and(|p| p.stations.iter().any(|s| s.scan_id == id && s.pose.is_some()));
+    for (s, id) in reg.stations.iter().zip(&ids) {
+        if was_placed(id) {
+            continue;
+        }
+        let fits: Vec<String> = reg
+            .pairs
+            .iter()
+            .filter(|p| p.good && !p.outlier && (p.a == *id || p.b == *id))
+            .filter_map(|p| {
+                let other = if p.a == *id { &p.b } else { &p.a };
+                let n = reg.stations.iter().find(|x| &x.scan_id == other)?.station;
+                Some(format!("{n} ({} mm)", p.rms_mm.unwrap_or(0.0)))
+            })
+            .collect();
+        let text = match (&s.pose, reg.stations.first().map(|f| f.scan_id == *id).unwrap_or(false)) {
+            (Some(_), true) => format!("Station {} is the project frame", s.station),
+            (Some(_), false) => format!("Station {} registered: fits station{} {}", s.station, if fits.len() == 1 { "" } else { "s" }, fits.join(", ")),
+            (None, _) => format!(
+                "Station {} did not register: it shares too little wall with the placed stations. Set up the next station where it sees walls an earlier station saw",
+                s.station
+            ),
+        };
+        st.log(if s.pose.is_some() { "note" } else { "check" }, text, "bridge", Some(project_id), &[("scan_id", id)]);
+    }
+    for (n, why) in &skipped {
+        st.log("check", format!("Station {n} could not be registered: {why}"), "bridge", Some(project_id), &[]);
+    }
+    st.log("note", format!("Registration: {}", reg.summary), "bridge", Some(project_id), &[("job_id", job_id)]);
+
+    // The mission's wall faces, judged again.
+    let geo = st.geo(project_id);
+    let mission = {
+        let mut inner = st.inner.lock().unwrap();
+        inner.missions.get_mut(project_id).map(|m| (m.refresh(&geo), m.clone()))
+    };
+    if let Some((changed, m)) = mission {
+        st.save_missions();
+        st.emit("mission", serde_json::json!(m));
+        if !changed.is_empty() {
+            st.log("note", format!("Ledger from the registration: {}", changed.join("; ")), "bridge", Some(project_id), &[("mission_id", &m.mission_id)]);
+        }
+    }
+    let placed = reg.stations.iter().filter(|s| s.pose.is_some()).count();
+    Ok(serde_json::json!({"project_id": project_id, "stations": reg.stations.len(), "placed": placed, "summary": reg.summary}))
 }
 
 enum Idle {

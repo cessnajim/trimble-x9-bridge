@@ -455,6 +455,60 @@ paths:
         "200": { description: The mission, signed off., content: { application/json: { schema: { $ref: "#/components/schemas/Mission" } } } }
         default: { $ref: "#/components/responses/Problem" }
 
+  /projects/{project_id}/registration:
+    parameters:
+      - { name: project_id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [projects]
+      operationId: getRegistration
+      summary: The project's stations in one frame, and the walls found. See guide.md, Registration.
+      responses:
+        "200": { description: "The registration (empty stations before the first full dome).", content: { application/json: { schema: { $ref: "#/components/schemas/Registration" } } } }
+        default: { $ref: "#/components/responses/Problem" }
+    post:
+      tags: [projects]
+      operationId: register
+      summary: Register again (the bridge does this after every full dome by itself). Any role but viewer.
+      responses:
+        "202": { description: "The registration job (the running one, if any; it then runs once more).", content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /projects/{project_id}/registration/plan:
+    parameters:
+      - { name: project_id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [projects]
+      operationId: getRegistrationPlan
+      summary: "The registered plan: stations, walls with ids, the mission's wall targets by status, a 5 m grid."
+      responses:
+        "200":
+          description: PNG.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /projects/{project_id}/registration/face:
+    parameters:
+      - { name: project_id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [projects]
+      operationId: judgeFace
+      summary: How much of a wall face the registered stations saw (changes nothing). 409 before registration.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                wall_id: { type: string }
+                from: { type: array, items: { type: number }, minItems: 2, maxItems: 2 }
+                to: { type: array, items: { type: number }, minItems: 2, maxItems: 2 }
+      responses:
+        "200": { description: The face's coverage., content: { application/json: { schema: { $ref: "#/components/schemas/FaceCoverage" } } } }
+        default: { $ref: "#/components/responses/Problem" }
+
   /missions:
     get:
       tags: [projects]
@@ -950,7 +1004,8 @@ paths:
         "200":
           description: |
             `text/event-stream`. Event types: `job` (data: a `Job`), `run`
-            (data: a `Run`) and `log` (data: a `LogEntry`). Each event's data
+            (data: a `Run`), `log` (data: a `LogEntry`), `mission` (a
+            `Mission`), `next_station` and `registration` (a `Registration`). Each event's data
             is the full JSON object on one line, so a client never needs to
             re-fetch. `job` events are also sent on every scanner poll while a
             scan runs. Events are not replayed; a client more than 256 events
@@ -1247,7 +1302,7 @@ components:
         job_id: { type: string }
         kind:
           type: string
-          enum: [scan, export, measurement]
+          enum: [scan, export, measurement, register]
           description: "`measurement` is planned (`x-status: planned`)."
         state: { $ref: "#/components/schemas/JobState" }
         phase:
@@ -1375,7 +1430,72 @@ components:
         stations: { type: array, items: { type: string }, description: Scan ids in this project. }
         measurement_id: { type: string }
         note: { type: string, maxLength: 300 }
+        wall_id: { type: string, writeOnly: true, description: "A wall of the registration; sets `face`." }
+        face: { $ref: "#/components/schemas/Face" }
+        geometry: { allOf: [{ $ref: "#/components/schemas/FaceCoverage" }], readOnly: true, description: "The bridge's judgement of `face`, kept current after every registration." }
         updated_at: { type: string, format: date-time, readOnly: true }
+
+    Face:
+      type: object
+      description: A wall face in plan, in the project frame (metres).
+      required: [from, to]
+      properties:
+        from: { type: array, items: { type: number }, minItems: 2, maxItems: 2 }
+        to: { type: array, items: { type: number }, minItems: 2, maxItems: 2 }
+
+    FaceCoverage:
+      type: object
+      properties:
+        length_m: { type: number }
+        seen_share: { type: number, description: "Share of the face's length seen (0.5 m columns with at least 1 m of wall height in points)." }
+        covered: { type: boolean, description: "seen_share >= 0.8" }
+        height_m: { type: array, items: { type: number } }
+        spacing_mm: { type: object, properties: { p50: { type: number }, p90: { type: number } } }
+        stations: { type: array, items: { type: object, properties: { station: { type: integer }, scan_id: { type: string }, seen_share: { type: number } } } }
+        unseen: { type: array, items: { type: object, properties: { from: { type: array, items: { type: number } }, to: { type: array, items: { type: number } }, length_m: { type: number } } } }
+
+    Registration:
+      type: object
+      properties:
+        project_id: { type: string }
+        frame: { type: string, description: "The first station's scanner: x and y as it faced (not north), z up, metres." }
+        summary: { type: string }
+        updated_at: { type: string, format: date-time }
+        registering_job_id: { type: string, nullable: true }
+        stations:
+          type: array
+          items:
+            type: object
+            properties:
+              station: { type: integer }
+              scan_id: { type: string }
+              placed: { type: boolean }
+              turn_deg: { type: number, nullable: true }
+              xyz_m: { type: array, items: { type: number }, nullable: true }
+        pairs:
+          type: array
+          description: Pairs that fit (each a constraint), with what the global fit left them.
+          items:
+            type: object
+            properties:
+              stations: { type: array, items: { type: integer } }
+              rms_mm: { type: number }
+              matches: { type: integer }
+              left_mm: { type: number }
+              outlier: { type: boolean }
+        pairs_tried: { type: integer }
+        walls:
+          type: array
+          items:
+            type: object
+            properties:
+              wall_id: { type: string }
+              from: { type: array, items: { type: number } }
+              to: { type: array, items: { type: number } }
+              length_m: { type: number }
+              z_m: { type: array, items: { type: number } }
+              seen_by: { type: array, items: { type: integer } }
+        plan_url: { type: string }
 
     Mission:
       type: object

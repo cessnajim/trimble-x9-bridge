@@ -52,6 +52,9 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/v1/scans/:scan_id/next-station/image", get(get_next_station_image))
         .route("/v1/next-stations", get(list_next_stations))
         .route("/v1/missions", get(list_missions))
+        .route("/v1/projects/:project_id/registration", get(get_registration).post(post_registration))
+        .route("/v1/projects/:project_id/registration/plan", get(get_registration_plan))
+        .route("/v1/projects/:project_id/registration/face", post(post_face))
         .route("/v1/projects/:project_id/mission", get(get_mission).put(put_mission))
         .route("/v1/projects/:project_id/mission/targets", post(update_targets))
         .route("/v1/projects/:project_id/mission/ready", post(mission_ready))
@@ -149,7 +152,7 @@ struct ScanFilter {
     project_id: Option<String>,
 }
 
-async fn all_scans(st: &AppState) -> ApiResult<Vec<Value>> {
+pub(crate) async fn all_scans(st: &AppState) -> ApiResult<Vec<Value>> {
     let (scans, projects) = (st.scanner.scans().await?, st.scanner.projects().await?);
     let meta = st.inner.lock().unwrap().scan_meta.clone();
     Ok(scans.iter().rev().filter_map(|s| map::scan(s, &scans, &projects, &meta)).collect())
@@ -592,7 +595,7 @@ async fn put_mission(State(st): St, h: HeaderMap, Path(project_id): Path<String>
     }
     let mut m = crate::mission::Mission::new(&req, &project_id, &c.name);
     if !req.targets.is_empty() {
-        m.update(&req.targets, &project_scans(&st, &project_id).await?).map_err(ApiError::invalid)?;
+        m.update(&req.targets, &project_scans(&st, &project_id).await?, &st.geo(&project_id)).map_err(ApiError::invalid)?;
     }
     st.log("note", format!("Mission: {} (done when: {})", m.goal, m.done_when), &c.name, Some(&project_id), &[("mission_id", &m.mission_id)]);
     Ok(mission_changed(&st, &m))
@@ -608,7 +611,7 @@ async fn update_targets(State(st): St, h: HeaderMap, Path(project_id): Path<Stri
     let req: TargetsReq = parse(&body)?;
     let mut m = mission_of(&st, &project_id)?;
     let known = project_scans(&st, &project_id).await?;
-    m.update(&req.targets, &known).map_err(|e| if e.contains("signed off") { ApiError::conflict(e) } else { ApiError::invalid(e) })?;
+    m.update(&req.targets, &known, &st.geo(&project_id)).map_err(|e| if e.contains("signed off") { ApiError::conflict(e) } else { ApiError::invalid(e) })?;
     Ok(mission_changed(&st, &m))
 }
 
@@ -642,6 +645,92 @@ async fn mission_sign_off(State(st): St, h: HeaderMap, Path(project_id): Path<St
     let via = m.confirmed_via.as_deref().map(|v| format!(" ({v})")).unwrap_or_default();
     st.log("approval", format!("Mission signed off: {} ({}){via}", m.goal, m.tally()), &c.name, Some(&project_id), &[("mission_id", &m.mission_id)]);
     Ok(mission_changed(&st, &m))
+}
+
+/// The project's registration: stations in one frame, the pairs that tie
+/// them, and the walls found in the merged plan.
+async fn get_registration(State(st): St, h: HeaderMap, Path(project_id): Path<String>) -> ApiResult<Json<Value>> {
+    st.caller(&h)?;
+    let (reg, running) = {
+        let inner = st.inner.lock().unwrap();
+        (inner.registrations.get(&project_id).cloned(), inner.registering.get(&project_id).cloned())
+    };
+    let mut v = match reg {
+        Some(r) => r.to_json(),
+        None => json!({"project_id": project_id, "stations": [], "walls": [], "pairs": [],
+                       "summary": "Not registered yet: the bridge registers each full dome as it lands."}),
+    };
+    v["registering_job_id"] = json!(running);
+    Ok(Json(v))
+}
+
+/// Register again (the bridge does this after every full dome by itself).
+async fn post_registration(State(st): St, h: HeaderMap, Path(project_id): Path<String>) -> ApiResult<Response> {
+    let c = st.require(&h, |r| r != Role::Viewer, "register stations")?;
+    if !st.scanner.projects().await?.iter().any(|p| p.project_uuid.as_deref() == Some(project_id.as_str())) {
+        return Err(ApiError::not_found("project"));
+    }
+    let job = crate::worker::queue_register(&st, &project_id, &c.name);
+    Ok((StatusCode::ACCEPTED, Json(job)).into_response())
+}
+
+/// The registered plan: stations, walls and the mission's wall faces.
+async fn get_registration_plan(State(st): St, h: HeaderMap, Path(project_id): Path<String>) -> ApiResult<Response> {
+    st.caller(&h)?;
+    let reg = st.inner.lock().unwrap().registrations.get(&project_id).cloned().ok_or_else(|| ApiError::not_found("registration"))?;
+    let merged = st.merged(&project_id).ok_or_else(|| ApiError::not_found("registration"))?;
+    let faces: Vec<(String, crate::register::Face, [u8; 3])> = st
+        .inner
+        .lock()
+        .unwrap()
+        .missions
+        .get(&project_id)
+        .map(|m| {
+            m.targets
+                .iter()
+                .filter_map(|t| {
+                    let col = match t.status {
+                        crate::mission::Status::Open => [248, 113, 113],
+                        crate::mission::Status::Declined => [148, 163, 184],
+                        _ => [74, 222, 128],
+                    };
+                    Some((t.target_id.clone(), t.face?, col))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let png = tokio::task::spawn_blocking(move || {
+        let stations: Vec<(u16, crate::register::Pose)> = reg.stations.iter().filter_map(|s| Some((s.station, s.pose?))).collect();
+        crate::register::plan_png(&merged, &crate::register::PlanMarks { stations: &stations, walls: &reg.walls, faces })
+    })
+    .await
+    .map_err(|e| ApiError::cache(format!("drawing: {e}")))?;
+    Ok(([(header::CONTENT_TYPE, "image/png")], png).into_response())
+}
+
+#[derive(Deserialize)]
+struct FaceReq {
+    #[serde(default)]
+    wall_id: Option<String>,
+    #[serde(default)]
+    from: Option<[f64; 2]>,
+    #[serde(default)]
+    to: Option<[f64; 2]>,
+}
+
+/// How much of a wall face the registered stations saw (changes nothing).
+async fn post_face(State(st): St, h: HeaderMap, Path(project_id): Path<String>, body: Bytes) -> ApiResult<Json<Value>> {
+    st.caller(&h)?;
+    let req: FaceReq = parse(&body)?;
+    let geo = st.geo(&project_id);
+    let face = match (&req.wall_id, req.from, req.to) {
+        (Some(w), _, _) => geo.wall(w).ok_or_else(|| ApiError::invalid(format!("there is no wall {w:?} in the registration")))?,
+        (None, Some(from), Some(to)) => crate::register::Face { from, to },
+        _ => return Err(ApiError::invalid("name a wall_id, or the face's from and to (project frame, m)")),
+    };
+    let mut v = geo.judge(&face).ok_or_else(|| ApiError::conflict("the project is not registered yet"))?;
+    v["face"] = json!(face);
+    Ok(Json(v))
 }
 
 fn default_margin() -> f64 {

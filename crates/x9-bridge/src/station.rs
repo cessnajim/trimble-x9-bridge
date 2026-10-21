@@ -126,14 +126,25 @@ fn colour(k: Kind) -> [u8; 3] {
 }
 
 /// An RGB canvas with the few shapes the picture needs.
-struct Canvas {
+pub struct Canvas {
     w: usize,
     h: usize,
     px: Vec<u8>,
 }
 
+/// The embedded label font.
+pub fn font() -> FontRef<'static> {
+    FontRef::try_from_slice(FONT).expect("embedded font")
+}
+
 impl Canvas {
-    fn put(&mut self, x: i64, y: i64, c: [u8; 3], a: f32) {
+    pub fn new(w: usize, h: usize, bg: [u8; 3]) -> Canvas {
+        Canvas { w, h, px: bg.iter().copied().cycle().take(w * h * 3).collect() }
+    }
+    pub fn png(&self) -> Vec<u8> {
+        crate::measure::png_rgb(self.w, self.h, &self.px)
+    }
+    pub fn put(&mut self, x: i64, y: i64, c: [u8; 3], a: f32) {
         if x < 0 || y < 0 || x as usize >= self.w || y as usize >= self.h {
             return;
         }
@@ -149,7 +160,7 @@ impl Canvas {
             }
         }
     }
-    fn line(&mut self, (x0, y0): (f32, f32), (x1, y1): (f32, f32), c: [u8; 3], width: f32) {
+    pub fn line(&mut self, (x0, y0): (f32, f32), (x1, y1): (f32, f32), c: [u8; 3], width: f32) {
         let n = ((x1 - x0).abs().max((y1 - y0).abs()) as usize).max(1);
         let r = (width / 2.0).max(0.5);
         for i in 0..=n {
@@ -170,7 +181,7 @@ impl Canvas {
         self.line((x1, y1), (x0, y1), c, width);
         self.line((x0, y1), (x0, y0), c, width);
     }
-    fn ellipse(&mut self, (cx, cy): (f32, f32), (rx, ry): (f32, f32), c: [u8; 3], width: f32, filled: bool) {
+    pub fn ellipse(&mut self, (cx, cy): (f32, f32), (rx, ry): (f32, f32), c: [u8; 3], width: f32, filled: bool) {
         let steps = 180;
         let mut prev = (cx + rx, cy);
         for i in 1..=steps {
@@ -191,7 +202,7 @@ impl Canvas {
         }
     }
     /// Text on a dark panel; `anchor_x`: 0 left, 0.5 middle, 1 right of `x`.
-    fn text(&mut self, font: &FontRef, size: f32, (x, y): (f32, f32), anchor_x: f32, s: &str, c: [u8; 3]) {
+    pub fn text(&mut self, font: &FontRef, size: f32, (x, y): (f32, f32), anchor_x: f32, s: &str, c: [u8; 3]) {
         let sf = font.as_scaled(PxScale::from(size));
         let width: f32 = s.chars().map(|ch| sf.h_advance(font.glyph_id(ch))).sum();
         let (ascent, descent) = (sf.ascent(), sf.descent());

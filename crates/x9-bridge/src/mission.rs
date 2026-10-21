@@ -6,8 +6,10 @@
 //! any target is open; the person then signs off once, and the mission is
 //! done. Kept in `missions.json` so a restart keeps them.
 
+use crate::register::{Face, Geo, FACE_COVERED};
 use crate::util::now_rfc3339;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -62,6 +64,12 @@ pub struct Target {
     /// Why it was declined, or anything worth knowing.
     #[serde(default)]
     pub note: String,
+    /// A wall face (project frame): the bridge judges it from the registered
+    /// stations and keeps `geometry` (seen share, stations, unseen stretches).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face: Option<Face>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<Value>,
     #[serde(default)]
     pub updated_at: String,
 }
@@ -115,6 +123,12 @@ pub struct TargetUpdate {
     pub measurement_id: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
+    /// A wall face, by its ends (project frame) …
+    #[serde(default)]
+    pub face: Option<Face>,
+    /// … or by a wall of the registration (`w3`).
+    #[serde(default)]
+    pub wall_id: Option<String>,
 }
 
 pub const MAX_TARGETS: usize = 200;
@@ -159,7 +173,10 @@ impl Mission {
     /// covered or measured target names its stations, a declined one its
     /// reason. Any change sends a ready mission back to work; a signed-off
     /// mission doesn't change. `known_scans`: the project's scan ids.
-    pub fn update(&mut self, ups: &[TargetUpdate], known_scans: &[String]) -> Result<(), String> {
+    /// A target with a wall face is judged from the registration: covered
+    /// once enough of it is seen (its stations filled in), and refused as
+    /// covered while it isn't.
+    pub fn update(&mut self, ups: &[TargetUpdate], known_scans: &[String], geo: &Geo) -> Result<(), String> {
         if self.state == State::SignedOff {
             return Err("the mission is signed off; start a new one to change it".into());
         }
@@ -176,7 +193,8 @@ impl Mission {
                         return Err(format!("at most {MAX_TARGETS} targets"));
                     }
                     next.push(Target { target_id: id.into(), name: String::new(), kind: String::new(), status: Status::Open,
-                                       stations: vec![], measurement_id: None, note: String::new(), updated_at: String::new() });
+                                       stations: vec![], measurement_id: None, note: String::new(), face: None, geometry: None,
+                                       updated_at: String::new() });
                     next.len() - 1
                 }
             };
@@ -199,6 +217,13 @@ impl Mission {
             if let Some(v) = &u.note {
                 t.note = v.trim().into();
             }
+            if let Some(w) = &u.wall_id {
+                t.face = Some(geo.wall(w.trim()).ok_or_else(|| format!("target {id}: there is no wall {w:?} in the registration (its walls list them)"))?);
+            }
+            if let Some(f) = u.face {
+                t.face = Some(f);
+            }
+            judge(t, geo)?;
             t.updated_at = now_rfc3339();
             short(&format!("target {id}: name"), &t.name, 80, true)?;
             short(&format!("target {id}: kind"), &t.kind, 30, false)?;
@@ -223,6 +248,31 @@ impl Mission {
             self.ready_summary = None;
         }
         Ok(())
+    }
+
+    /// Re-judge wall faces after the registration changed: a face now seen
+    /// enough is covered, a covered one no longer seen enough opens again.
+    /// Returns what changed ("North facade: covered").
+    pub fn refresh(&mut self, geo: &Geo) -> Vec<String> {
+        if self.state == State::SignedOff {
+            return vec![];
+        }
+        let mut changed = Vec::new();
+        for t in &mut self.targets {
+            let before = t.status;
+            if judge(t, geo).is_err() {
+                t.status = Status::Open;
+            }
+            if t.status != before {
+                t.updated_at = now_rfc3339();
+                changed.push(format!("{}: {}", t.name, if t.status == Status::Covered { "covered" } else { "open again" }));
+            }
+        }
+        if !changed.is_empty() && self.state == State::Ready {
+            self.state = State::Active;
+            self.ready_summary = None;
+        }
+        changed
     }
 
     /// Ready to leave: every target settled. Returns the open ones otherwise.
@@ -270,6 +320,34 @@ impl Mission {
     }
 }
 
+/// Judge a target's wall face (when it has one and the project is registered).
+fn judge(t: &mut Target, geo: &Geo) -> Result<(), String> {
+    let Some(f) = t.face else { return Ok(()) };
+    let Some(v) = geo.judge(&f) else { return Ok(()) };
+    if let Some(e) = v["error"].as_str() {
+        return Err(format!("target {}: {e}", t.target_id));
+    }
+    let covered = v["covered"] == true;
+    let scans: Vec<String> = v["stations"].as_array().map(|a| a.iter().filter_map(|s| s["scan_id"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let share = v["seen_share"].as_f64().unwrap_or(0.0);
+    t.geometry = Some(v);
+    match t.status {
+        Status::Open if covered => {
+            t.status = Status::Covered;
+            t.stations = scans;
+        }
+        Status::Covered if !covered => {
+            return Err(format!(
+                "target {}: only {:.0}% of its length is seen ({:.0}% needed); keep it open and cover the unseen stretches, or decline it with the reason",
+                t.target_id, share * 100.0, FACE_COVERED * 100.0
+            ));
+        }
+        Status::Covered if t.stations.is_empty() => t.stations = scans,
+        _ => {}
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,7 +358,8 @@ mod tests {
     }
     fn up(id: &str, status: Option<Status>, stations: &[&str], note: &str) -> TargetUpdate {
         TargetUpdate { target_id: id.into(), name: Some(format!("{id} facade")), kind: Some("facade".into()), status,
-                       stations: Some(stations.iter().map(|s| s.to_string()).collect()), measurement_id: None, note: Some(note.into()) }
+                       stations: Some(stations.iter().map(|s| s.to_string()).collect()), measurement_id: None, note: Some(note.into()),
+                       face: None, wall_id: None }
     }
 
     #[test]
@@ -288,24 +367,24 @@ mod tests {
         let scans = vec!["s1".to_string(), "s2".to_string()];
         let mut m = Mission::new(&req(), "p1", "claude");
         assert!(m.ready("all done").unwrap_err().contains("empty"));
-        m.update(&[up("north", None, &[], ""), up("south", Some(Status::Covered), &["s1"], "")], &scans).unwrap();
+        m.update(&[up("north", None, &[], ""), up("south", Some(Status::Covered), &["s1"], "")], &scans, &Geo::none()).unwrap();
         assert!(m.ready("all done").unwrap_err().contains("1 target is still open: north facade"));
-        assert!(m.update(&[up("north", Some(Status::Covered), &[], "")], &scans).unwrap_err().contains("names the stations"));
-        assert!(m.update(&[up("north", Some(Status::Covered), &["s9"], "")], &scans).unwrap_err().contains("not in this project"));
-        assert!(m.update(&[up("north", Some(Status::Declined), &[], "")], &scans).unwrap_err().contains("says why"));
-        m.update(&[up("north", Some(Status::Declined), &[], "behind a locked fence")], &scans).unwrap();
+        assert!(m.update(&[up("north", Some(Status::Covered), &[], "")], &scans, &Geo::none()).unwrap_err().contains("names the stations"));
+        assert!(m.update(&[up("north", Some(Status::Covered), &["s9"], "")], &scans, &Geo::none()).unwrap_err().contains("not in this project"));
+        assert!(m.update(&[up("north", Some(Status::Declined), &[], "")], &scans, &Geo::none()).unwrap_err().contains("says why"));
+        m.update(&[up("north", Some(Status::Declined), &[], "behind a locked fence")], &scans, &Geo::none()).unwrap();
         assert_eq!(m.tally(), "1 covered, 1 declined");
         assert!(m.sign_off("jim", None).is_err());
         m.ready("South seen from s1; north behind a locked fence.").unwrap();
         assert_eq!(m.state, State::Ready);
         // A change sends it back to work.
-        m.update(&[up("east", None, &[], "")], &scans).unwrap();
+        m.update(&[up("east", None, &[], "")], &scans, &Geo::none()).unwrap();
         assert_eq!(m.state, State::Active);
-        m.update(&[up("east", Some(Status::Covered), &["s2"], "")], &scans).unwrap();
+        m.update(&[up("east", Some(Status::Covered), &["s2"], "")], &scans, &Geo::none()).unwrap();
         m.ready("done").unwrap();
         m.sign_off("jim", Some("asked in the chat".into())).unwrap();
         assert_eq!(m.state, State::SignedOff);
-        assert!(m.update(&[up("west", None, &[], "")], &scans).unwrap_err().contains("signed off"));
+        assert!(m.update(&[up("west", None, &[], "")], &scans, &Geo::none()).unwrap_err().contains("signed off"));
     }
 
     #[test]
@@ -314,6 +393,52 @@ mod tests {
         r.goal = " ".into();
         assert!(r.check().unwrap_err().contains("goal"));
         let mut m = Mission::new(&req(), "p1", "claude");
-        assert!(m.update(&[up("no spaces", None, &[], "")], &[]).unwrap_err().contains("target_id"));
+        assert!(m.update(&[up("no spaces", None, &[], "")], &[], &Geo::none()).unwrap_err().contains("target_id"));
+    }
+
+    /// A wall seen over x 0..8 at y = 5 by station 1.
+    fn geo() -> Geo {
+        let mut m = crate::register::Merged::default();
+        for i in 0..160 {
+            for k in 0..30 {
+                m.pts.push([i as f32 * 0.05, 5.0, -1.5 + k as f32 * 0.1]);
+                m.spacing_mm.push(5.0);
+                m.station.push(1);
+            }
+        }
+        let walls = crate::register::walls(&m);
+        Geo { walls, merged: Some(std::sync::Arc::new(m)), scans: [(1u16, "s1".to_string())].into() }
+    }
+
+    #[test]
+    fn wall_faces_are_judged_from_the_registration() {
+        let scans = vec!["s1".to_string()];
+        let g = geo();
+        let mut m = Mission::new(&req(), "p1", "claude");
+        let face = |id: &str, to: f64, status: Option<Status>| TargetUpdate {
+            target_id: id.into(), name: Some(id.into()), kind: Some("facade".into()), status, stations: None, measurement_id: None,
+            note: None, face: Some(Face { from: [0.0, 5.0], to: [to, 5.0] }), wall_id: None,
+        };
+        // Seen along its whole length: covered by the bridge, with its station.
+        m.update(&[face("near", 8.0, None)], &scans, &g).unwrap();
+        assert_eq!(m.targets[0].status, Status::Covered);
+        assert_eq!(m.targets[0].stations, vec!["s1".to_string()]);
+        // Seen over 40%: stays open, and can't be called covered.
+        m.update(&[face("long", 20.0, None)], &scans, &g).unwrap();
+        assert_eq!(m.targets[1].status, Status::Open);
+        assert_eq!(m.targets[1].geometry.as_ref().unwrap()["seen_share"], 0.4);
+        assert!(m.update(&[face("long", 20.0, Some(Status::Covered))], &scans, &g).unwrap_err().contains("only 40%"));
+        // By wall id.
+        let w = TargetUpdate { face: None, wall_id: Some("w1".into()), ..face("by-id", 0.0, None) };
+        m.update(&[w], &scans, &g).unwrap();
+        assert_eq!(m.targets[2].status, Status::Covered);
+        let bad = TargetUpdate { face: None, wall_id: Some("w9".into()), ..face("nope", 0.0, None) };
+        assert!(m.update(&[bad], &scans, &g).unwrap_err().contains("no wall"));
+        // Without a registration a face is kept but not judged.
+        m.update(&[face("later", 20.0, None)], &scans, &Geo::none()).unwrap();
+        assert_eq!(m.targets[3].status, Status::Open);
+        assert!(m.targets[3].geometry.is_none());
+        let changed = m.refresh(&g);
+        assert!(changed.is_empty(), "{changed:?}");
     }
 }

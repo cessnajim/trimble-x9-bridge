@@ -343,6 +343,28 @@ try:
               and "next_station" in events, (s, ns, s2, ctype))
         s, _ = call("PUT", f"/scans/{sc2['scan_id']}/next-station", "agent", {**prop, "marker": {"x": 100, "y": 100}})
         check("a proposal on the area scan too", s == 200, s)
+    # Registration: each full dome lands in the project frame by itself.
+    _, in_project = call("GET", f"/scans?project_id={pid}", "viewer")
+    domes = [x for x in in_project if x["kind"] == "full_dome"]
+    deadline, reg = time.time() + 180, None
+    while time.time() < deadline:
+        _, reg = call("GET", f"/projects/{pid}/registration", "viewer")
+        if not reg["registering_job_id"] and reg.get("updated_at") and (len(reg["stations"]) == len(domes) or not FIX):
+            break
+        time.sleep(1)
+    check("the bridge registers the project's full domes after each scan", reg.get("updated_at") and not reg["registering_job_id"], reg)
+    s, b = call("POST", f"/projects/{pid}/registration", "viewer")
+    check("viewer can't start a registration (403)", s == 403, b)
+    if FIX:
+        check("every full dome is placed in one frame, with walls", len(reg["stations"]) == len(domes) >= 1
+              and all(x["placed"] for x in reg["stations"]) and reg["walls"] and "registration" in events, reg["summary"])
+        s, ctype, png = fetch(f"/projects/{pid}/registration/plan", "viewer")
+        check("the registered plan is drawn", s == 200 and ctype == "image/png" and png[1:4] == b"PNG", (s, ctype))
+        s, fc = call("POST", f"/projects/{pid}/registration/face", "viewer", {"wall_id": reg["walls"][0]["wall_id"]})
+        check("a wall face is judged: share of its length seen, and by which stations", s == 200 and fc["seen_share"] > 0.5 and fc["stations"], fc)
+        s, b = call("POST", f"/projects/{pid}/registration/face", "viewer", {"wall_id": "w999"})
+        check("an unknown wall is refused (400)", s == 400, b)
+        check("registrations are saved for a restart", os.path.exists(os.path.join(tmp, "data", "registrations.json")))
     # Missions: the goal, the ledger, ready to leave, one sign-off.
     s, b = call("PUT", f"/projects/{pid}/mission", "viewer", {"goal": "x", "kind": "exterior", "done_when": "y"})
     check("viewer can't set a mission (403)", s == 403, b)
@@ -351,6 +373,19 @@ try:
                  "targets": [{"target_id": "north", "name": "North facade", "kind": "facade"}]})
     check("an agent sets the mission with its first target", s == 200 and ms["state"] == "active" and ms["targets"][0]["status"] == "open"
           and "mission" in events, ms)
+    if FIX:
+        w = reg["walls"][0]
+        s, ms = call("POST", f"/projects/{pid}/mission/targets", "agent", {"targets": [
+            {"target_id": "longest-wall", "name": "Longest wall", "kind": "wall", "wall_id": w["wall_id"]}]})
+        t = ms["targets"][-1] if s == 200 else ms
+        check("a target on a registered wall is covered by the bridge once seen", s == 200 and t["status"] == "covered"
+              and t["stations"] and t["face"]["from"] == w["from"] and t["geometry"]["seen_share"] >= 0.8, t)
+        far = {"target_id": "far-wall", "name": "Far wall", "kind": "wall", "face": {"from": [100, 100], "to": [110, 100]}}
+        s, ms = call("POST", f"/projects/{pid}/mission/targets", "agent", {"targets": [far]})
+        s2, b = call("POST", f"/projects/{pid}/mission/targets", "agent", {"targets": [{**far, "status": "covered", "stations": [station_scan]}]})
+        check("a wall face nobody saw stays open and can't be called covered", s == 200 and ms["targets"][-1]["status"] == "open"
+              and s2 == 400 and "only 0%" in b["detail"], (s, s2, b))
+        call("POST", f"/projects/{pid}/mission/targets", "agent", {"targets": [{**far, "status": "declined", "note": "not on this site"}]})
     s, b = call("POST", f"/projects/{pid}/mission/ready", "agent", {"summary": "done"})
     check("ready to leave is refused while a target is open, naming it", s == 409 and "North facade" in b["detail"], b)
     s, b = call("POST", f"/projects/{pid}/mission/targets", "agent", {"targets": [{"target_id": "north", "status": "covered", "stations": ["nope"]}]})
@@ -367,7 +402,7 @@ try:
     s, b = call("POST", f"/projects/{pid}/mission/targets", "agent", {"targets": [{"target_id": "west", "name": "West facade"}]})
     check("a signed-off mission doesn't change (409)", s == 409, b)
     _, log = call("GET", f"/log?project_id={pid}", "viewer")
-    check("the mission's sign-off is in the field log with its tally", any("Mission signed off" in e["text"] and "1 covered, 1 declined" in e["text"]
+    check("the mission's sign-off is in the field log with its tally", any("Mission signed off" in e["text"] and ("2 covered, 2 declined" if FIX else "1 covered, 1 declined") in e["text"]
           for e in log), [e["text"] for e in log][-4:])
     missions_file = os.path.join(tmp, "data", "missions.json")
     check("missions are saved for a restart", os.path.exists(missions_file)
