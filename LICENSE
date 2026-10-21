@@ -19,10 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-NOTE: "Trimble" and "X9" are trademarks of Trimble Inc. This project is an
-independent, clean-room interoperability effort and is not affiliated with or
-endorsed by Trimble. It contains no Trimble source code, firmware, or binaries;
-the protocol notes in docs/ are original analysis for interoperability.

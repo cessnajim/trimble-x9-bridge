@@ -1,0 +1,4 @@
+NOTE: "Trimble" and "X9" are trademarks of Trimble Inc. This project is an
+independent, clean-room interoperability effort and is not affiliated with or
+endorsed by Trimble. It contains no Trimble source code, firmware, or binaries;
+the protocol notes in docs/ are original analysis for interoperability.
