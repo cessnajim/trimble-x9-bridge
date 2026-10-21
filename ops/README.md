@@ -31,6 +31,30 @@ restarts the bridge whenever one of the scanner's connections comes up (set
 sudo install -m 0755 ops/90-x9-bridge /etc/NetworkManager/dispatcher.d/
 ```
 
+### Prefer the scanner's Wi-Fi
+
+On a Pi that also knows a home network, NetworkManager joins whichever it sees
+first and then stays there: it never leaves a working network for a better
+one. So after the scanner's access point drops (a reboot, a flat battery), the
+Pi stays on home Wi-Fi and the bridge loses the scanner. Two fixes, both
+needed:
+
+```bash
+# Prefer the scanner's network when both are in range at start-up.
+sudo nmcli connection modify x9-wifi connection.autoconnect-priority 10
+# Every 30 s: if the scanner's network is in range and the Pi is on another, switch.
+sudo install -m 0755 ops/x9-wifi-prefer -t /opt/x9-bridge/
+sudo install -m 0644 ops/x9-wifi-prefer.service ops/x9-wifi-prefer.timer /etc/systemd/system/
+sudo systemctl enable --now x9-wifi-prefer.timer
+```
+
+`x9-wifi-prefer` does nothing while the Pi is on the scanner's network or the
+scanner's network isn't in range; when the scanner's network goes away,
+NetworkManager falls back to home Wi-Fi by itself. After a failed switch it
+waits 2 minutes before trying again. It logs to the journal
+(`journalctl -t x9-wifi-prefer`). Set `X9_WIFI_CON` / `X9_WIFI_DEV` in the
+service if your profile or interface has another name.
+
 ## `x9-netctl`
 
 A small privileged helper to bring the scanner's USB link up isolated (no

@@ -1,0 +1,10 @@
+[Unit]
+Description=Check every 30 s whether the scanner's Wi-Fi is in range
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=30
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target

@@ -30,7 +30,7 @@ jobs:
           d=trimble-x9-bridge-${{ github.ref_name }}-${{ matrix.target }}
           mkdir -p $d/ops
           cp target/${{ matrix.target }}/release/{x9-bridge,x9-mock,x9} $d/
-          cp ops/x9-netctl ops/90-x9-bridge ops/x9-bridge-run ops/x9-bridge.service ops/README.md $d/ops/
+          cp ops/x9-netctl ops/90-x9-bridge ops/x9-bridge-run ops/x9-bridge.service ops/x9-wifi-prefer ops/x9-wifi-prefer.service ops/x9-wifi-prefer.timer ops/README.md $d/ops/
           cp -r README.md PROVENANCE.md LICENSE docs $d/
           tar -czf $d.tar.gz $d
           sha256sum $d.tar.gz > $d.tar.gz.sha256

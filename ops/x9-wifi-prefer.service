@@ -1,0 +1,7 @@
+[Unit]
+Description=Switch the Pi's Wi-Fi to the scanner's network when it is in range
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/x9-bridge/x9-wifi-prefer

@@ -1,0 +1,26 @@
+#!/bin/sh
+# x9-wifi-prefer: when the scanner's Wi-Fi is in range and the Pi's Wi-Fi is
+# on another network (home Wi-Fi), switch to the scanner's. NetworkManager
+# never leaves a working network for a better one by itself, so after the
+# scanner's access point drops (a reboot, a flat battery) the Pi would stay on
+# home Wi-Fi. When the scanner's Wi-Fi is gone, NetworkManager falls back to
+# home Wi-Fi on its own. Run by x9-wifi-prefer.timer every 30 s.
+# Config: X9_WIFI_CON (profile, default x9-wifi), X9_WIFI_DEV (default wlan0).
+CON="${X9_WIFI_CON:-x9-wifi}"
+DEV="${X9_WIFI_DEV:-wlan0}"
+STAMP=/run/x9-wifi-prefer.last
+SSID=$(nmcli -g 802-11-wireless.ssid connection show "$CON" 2>/dev/null) || exit 0
+[ -n "$SSID" ] || exit 0
+ACTIVE=$(nmcli -g GENERAL.CONNECTION device show "$DEV" 2>/dev/null)
+[ "$ACTIVE" = "$CON" ] && exit 0
+# After a failed switch, wait 2 minutes before trying again (a scanner that is
+# still booting shows its network before it accepts clients).
+if [ -f "$STAMP" ] && [ $(( $(date +%s) - $(cat "$STAMP") )) -lt 120 ]; then exit 0; fi
+nmcli -t -f SSID device wifi list ifname "$DEV" --rescan auto 2>/dev/null | grep -Fxq "$SSID" || exit 0
+logger -t x9-wifi-prefer "scanner Wi-Fi $SSID in range; switching $DEV from ${ACTIVE:-nothing} to $CON"
+if nmcli connection up "$CON" ifname "$DEV" >/dev/null 2>&1; then
+  rm -f "$STAMP"
+else
+  date +%s > "$STAMP"
+  logger -t x9-wifi-prefer "could not join $SSID; staying on ${ACTIVE:-nothing}, retry in 2 minutes"
+fi
