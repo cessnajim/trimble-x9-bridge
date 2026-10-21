@@ -51,6 +51,11 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/v1/scans/:scan_id/next-station", get(get_next_station).put(put_next_station))
         .route("/v1/scans/:scan_id/next-station/image", get(get_next_station_image))
         .route("/v1/next-stations", get(list_next_stations))
+        .route("/v1/missions", get(list_missions))
+        .route("/v1/projects/:project_id/mission", get(get_mission).put(put_mission))
+        .route("/v1/projects/:project_id/mission/targets", post(update_targets))
+        .route("/v1/projects/:project_id/mission/ready", post(mission_ready))
+        .route("/v1/projects/:project_id/mission/sign-off", post(mission_sign_off))
         .route("/v1/scans/:scan_id/exports", post(start_export))
         .route("/v1/exports/:export_id", get(get_export))
         .route("/v1/exports/:export_id/file", get(get_export_file))
@@ -540,6 +545,103 @@ async fn list_next_stations(State(st): St, h: HeaderMap) -> ApiResult<Json<Value
     let mut all: Vec<Value> = st.inner.lock().unwrap().next_stations.values().map(|(v, _)| v.clone()).collect();
     all.sort_by(|a, b| b["at"].as_str().cmp(&a["at"].as_str()));
     Ok(Json(json!(all)))
+}
+
+/// A project's scan ids (a mission's targets may only name these).
+async fn project_scans(st: &AppState, project_id: &str) -> ApiResult<Vec<String>> {
+    Ok(all_scans(st)
+        .await?
+        .into_iter()
+        .filter(|s| s["project_id"] == project_id)
+        .filter_map(|s| s["scan_id"].as_str().map(str::to_string))
+        .collect())
+}
+
+/// Store a changed mission: save, announce, return it.
+fn mission_changed(st: &AppState, m: &crate::mission::Mission) -> Json<Value> {
+    st.inner.lock().unwrap().missions.insert(m.project_id.clone(), m.clone());
+    st.save_missions();
+    let v = json!(m);
+    st.emit("mission", v.clone());
+    Json(v)
+}
+
+fn mission_of(st: &AppState, project_id: &str) -> ApiResult<crate::mission::Mission> {
+    st.inner.lock().unwrap().missions.get(project_id).cloned().ok_or_else(|| ApiError::not_found("mission"))
+}
+
+async fn list_missions(State(st): St, h: HeaderMap) -> ApiResult<Json<Value>> {
+    st.caller(&h)?;
+    let mut all: Vec<crate::mission::Mission> = st.inner.lock().unwrap().missions.values().cloned().collect();
+    all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(Json(json!(all)))
+}
+
+async fn get_mission(State(st): St, h: HeaderMap, Path(project_id): Path<String>) -> ApiResult<Json<Value>> {
+    st.caller(&h)?;
+    Ok(Json(json!(mission_of(&st, &project_id)?)))
+}
+
+/// Set the project's mission (replacing any earlier one), optionally with its first targets.
+async fn put_mission(State(st): St, h: HeaderMap, Path(project_id): Path<String>, body: Bytes) -> ApiResult<Json<Value>> {
+    let c = st.require(&h, |r| r != Role::Viewer, "set missions")?;
+    let req: crate::mission::MissionRequest = parse(&body)?;
+    req.check().map_err(ApiError::invalid)?;
+    if !st.scanner.projects().await?.iter().any(|p| p.project_uuid.as_deref() == Some(project_id.as_str())) {
+        return Err(ApiError::not_found("project"));
+    }
+    let mut m = crate::mission::Mission::new(&req, &project_id, &c.name);
+    if !req.targets.is_empty() {
+        m.update(&req.targets, &project_scans(&st, &project_id).await?).map_err(ApiError::invalid)?;
+    }
+    st.log("note", format!("Mission: {} (done when: {})", m.goal, m.done_when), &c.name, Some(&project_id), &[("mission_id", &m.mission_id)]);
+    Ok(mission_changed(&st, &m))
+}
+
+#[derive(Deserialize)]
+struct TargetsReq {
+    targets: Vec<crate::mission::TargetUpdate>,
+}
+
+async fn update_targets(State(st): St, h: HeaderMap, Path(project_id): Path<String>, body: Bytes) -> ApiResult<Json<Value>> {
+    st.require(&h, |r| r != Role::Viewer, "update missions")?;
+    let req: TargetsReq = parse(&body)?;
+    let mut m = mission_of(&st, &project_id)?;
+    let known = project_scans(&st, &project_id).await?;
+    m.update(&req.targets, &known).map_err(|e| if e.contains("signed off") { ApiError::conflict(e) } else { ApiError::invalid(e) })?;
+    Ok(mission_changed(&st, &m))
+}
+
+#[derive(Deserialize)]
+struct ReadyReq {
+    summary: String,
+}
+
+/// The agent says the job is done: refused while any target is open.
+async fn mission_ready(State(st): St, h: HeaderMap, Path(project_id): Path<String>, body: Bytes) -> ApiResult<Json<Value>> {
+    let c = st.require(&h, |r| r != Role::Viewer, "update missions")?;
+    let req: ReadyReq = parse(&body)?;
+    let mut m = mission_of(&st, &project_id)?;
+    m.ready(&req.summary).map_err(ApiError::conflict)?;
+    st.log("note", format!("Ready to leave: {} ({})", req.summary.trim(), m.tally()), &c.name, Some(&project_id), &[("mission_id", &m.mission_id)]);
+    Ok(mission_changed(&st, &m))
+}
+
+#[derive(Deserialize, Default)]
+struct SignOffReq {
+    #[serde(default)]
+    confirmed_via: Option<String>,
+}
+
+/// The person signs the job off (operator): the mission is done.
+async fn mission_sign_off(State(st): St, h: HeaderMap, Path(project_id): Path<String>, body: Bytes) -> ApiResult<Json<Value>> {
+    let c = st.require(&h, Role::is_operator, "sign off missions")?;
+    let req: SignOffReq = if body.iter().all(u8::is_ascii_whitespace) { SignOffReq::default() } else { parse(&body)? };
+    let mut m = mission_of(&st, &project_id)?;
+    m.sign_off(&c.name, req.confirmed_via).map_err(ApiError::conflict)?;
+    let via = m.confirmed_via.as_deref().map(|v| format!(" ({v})")).unwrap_or_default();
+    st.log("approval", format!("Mission signed off: {} ({}){via}", m.goal, m.tally()), &c.name, Some(&project_id), &[("mission_id", &m.mission_id)]);
+    Ok(mission_changed(&st, &m))
 }
 
 fn default_margin() -> f64 {

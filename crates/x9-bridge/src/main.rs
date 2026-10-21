@@ -17,6 +17,7 @@ mod export;
 mod files;
 mod map;
 mod measure;
+mod mission;
 mod model;
 mod problem;
 mod recipe;
@@ -76,6 +77,10 @@ async fn main() -> anyhow::Result<()> {
     let scanner = x9_client::Client::connect(&base)?;
     let st = Arc::new(state::AppState::new(scanner, tokens, Rules::default(), poll, data_dir, recipes_dir.clone()));
     st.log("rule", format!("Bridge {} started; scanner at {base}", routes::VERSION), "bridge", None, &[]);
+    let missions = st.load_missions();
+    if missions > 0 {
+        st.log("note", format!("{missions} mission{} kept from before the restart", if missions == 1 { "" } else { "s" }), "bridge", None, &[]);
+    }
     let kept = st.load_grants();
     if kept > 0 {
         st.log("approval", format!("{kept} grant{} kept from before the restart", if kept == 1 { "" } else { "s" }), "bridge", None, &[]);

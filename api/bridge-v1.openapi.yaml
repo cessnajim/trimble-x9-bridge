@@ -375,6 +375,94 @@ paths:
               schema: { type: string, format: binary }
         default: { $ref: "#/components/responses/Problem" }
 
+  /projects/{project_id}/mission:
+    parameters:
+      - { name: project_id, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [projects]
+      operationId: getMission
+      responses:
+        "200": { description: "The project's mission and ledger.", content: { application/json: { schema: { $ref: "#/components/schemas/Mission" } } } }
+        default: { $ref: "#/components/responses/Problem" }
+    put:
+      tags: [projects]
+      operationId: setMission
+      summary: Set what the job is for (replaces any earlier mission). See guide.md, Missions.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [goal, kind, done_when]
+              properties:
+                goal: { type: string, maxLength: 300 }
+                kind: { type: string, enum: [exterior, windows, room, custom] }
+                done_when: { type: string, maxLength: 600 }
+                targets: { type: array, items: { $ref: "#/components/schemas/MissionTarget" } }
+      responses:
+        "200": { description: The mission., content: { application/json: { schema: { $ref: "#/components/schemas/Mission" } } } }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /projects/{project_id}/mission/targets:
+    parameters:
+      - { name: project_id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [projects]
+      operationId: updateMissionTargets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targets]
+              properties:
+                targets: { type: array, items: { $ref: "#/components/schemas/MissionTarget" } }
+      responses:
+        "200": { description: The mission., content: { application/json: { schema: { $ref: "#/components/schemas/Mission" } } } }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /projects/{project_id}/mission/ready:
+    parameters:
+      - { name: project_id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [projects]
+      operationId: missionReady
+      summary: Ready to leave; 409 while any target is open.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [summary], properties: { summary: { type: string, maxLength: 1000 } } }
+      responses:
+        "200": { description: The mission, now ready., content: { application/json: { schema: { $ref: "#/components/schemas/Mission" } } } }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /projects/{project_id}/mission/sign-off:
+    parameters:
+      - { name: project_id, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [projects]
+      operationId: missionSignOff
+      summary: The person signs the job off (operator).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object, properties: { confirmed_via: { type: string, maxLength: 300 } } }
+      responses:
+        "200": { description: The mission, signed off., content: { application/json: { schema: { $ref: "#/components/schemas/Mission" } } } }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /missions:
+    get:
+      tags: [projects]
+      operationId: listMissions
+      responses:
+        "200": { description: Every project's mission, newest first., content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Mission" } } } } }
+        default: { $ref: "#/components/responses/Problem" }
+
   /next-stations:
     get:
       tags: [scans]
@@ -1275,6 +1363,36 @@ components:
             use the scan's preview when it can be downloaded, else mid-grey.
             `preview` fails the export (`decode_failed`) without a preview.
             `none` writes mid-grey. Points are always levelled.
+
+    MissionTarget:
+      type: object
+      required: [target_id]
+      properties:
+        target_id: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" }
+        name: { type: string, maxLength: 80 }
+        kind: { type: string, maxLength: 30 }
+        status: { type: string, enum: [open, covered, measured, declined] }
+        stations: { type: array, items: { type: string }, description: Scan ids in this project. }
+        measurement_id: { type: string }
+        note: { type: string, maxLength: 300 }
+        updated_at: { type: string, format: date-time, readOnly: true }
+
+    Mission:
+      type: object
+      properties:
+        mission_id: { type: string }
+        project_id: { type: string }
+        goal: { type: string }
+        kind: { type: string, enum: [exterior, windows, room, custom] }
+        done_when: { type: string }
+        state: { type: string, enum: [active, ready, signed_off] }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+        targets: { type: array, items: { $ref: "#/components/schemas/MissionTarget" } }
+        ready_summary: { type: string }
+        signed_off_by: { type: string }
+        signed_off_at: { type: string, format: date-time }
+        confirmed_via: { type: string }
 
     NextStationRequest:
       type: object

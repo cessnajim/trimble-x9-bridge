@@ -847,6 +847,34 @@ coverage only, never intensity.
 
 Deleting a scan deletes its view and coverage files.
 
+### Missions: what the job is for, and when it is done
+
+A mission turns the person's sentence into a definition of done that the
+bridge holds the agent to:
+
+```bash
+curl -s -X PUT -H "$H" -d '{"goal":"Scan the exterior of the house","kind":"exterior",
+  "done_when":"Every facade seen at <= 12 mm spacing, no shadow on the house walls",
+  "targets":[{"target_id":"north","name":"North facade","kind":"facade"}]}' $B/projects/$PROJECT/mission
+curl -s -X POST -H "$H" -d '{"targets":[{"target_id":"north","status":"covered","stations":["<scan id>"]},
+  {"target_id":"south","name":"South facade","status":"declined","note":"neighbour'"'"'s yard, locked"}]}' $B/projects/$PROJECT/mission/targets
+curl -s -X POST -H "$H" -d '{"summary":"North from station 1; south declined (locked yard)."}' $B/projects/$PROJECT/mission/ready
+curl -s -X POST -H "$OPERATOR" -d '{"confirmed_via":"web UI"}' $B/projects/$PROJECT/mission/sign-off
+```
+
+| Part | Rules |
+| --- | --- |
+| Mission | `goal` (the person's words, 1–300 characters), `kind` `exterior`, `windows`, `room` or `custom`, `done_when` (criteria, 1–600). One per project; a new one replaces it. Any role but `viewer` |
+| Targets | Upserted by `target_id` (letters, digits, `-`, `_`), up to 200. `status` `open`, `covered` (names its scans, which must be in the project), `measured` (also a `measurement_id`) or `declined` (says why in `note`) |
+| Ready | `POST …/ready` with a summary: `409 conflict` while any target is open, naming them; refused on an empty ledger. A later change to the ledger sends the mission back to active |
+| Sign-off | `POST …/sign-off`, operator only, optional `confirmed_via` (how the person said it). The mission is then done: further changes are `409` |
+
+Every change is announced as a `mission` event and saved to
+`missions.json` in the data directory, so a restart keeps the job. The field
+log gets the mission, "Ready to leave" and the sign-off with its tally. The
+web UI shows the mission and its ledger at the top of Now, with **Sign off
+the job** for operators when it is ready.
+
 ### Propose the next station
 
 After checking a station's coverage, the agent shows the person where to set

@@ -50,6 +50,7 @@ const S = {
   measurements: {}, // measurement_id -> measurement record
   grants: [],      // active grants
   nextStations: [], // the agent's next-station proposals, newest first
+  missions: [],     // each project's mission, newest first
   nsImages: new Map(), // scan_id|at -> object URL | "loading" | {error}
   evidence: new Map(), // measurement_id -> object URL | "loading" | {error}
   watchMeasure: {}, // scan_id -> job_id
@@ -205,6 +206,7 @@ async function load(what) {
       case "log": S.log = (await api("/log")).reverse(); break;
       case "grants": S.grants = await api("/grants"); break;
       case "next-stations": S.nextStations = await api("/next-stations"); break;
+      case "missions": S.missions = await api("/missions"); break;
       case "scans":
         S.scans = S.project ? await api(`/scans?project_id=${encodeURIComponent(S.project)}`) : [];
         for (const sc of S.scans) S.scanById[sc.scan_id] = sc;
@@ -254,6 +256,28 @@ function nsImage(p) {
     .catch((e) => S.nsImages.set(key, { error: e.message }))
     .finally(() => render());
   return "loading";
+}
+
+// What the job is for, the agent's ledger, and the one sign-off before leaving.
+const TARGET_CHIP = { open: ["warn", "open"], covered: ["good", "covered"], measured: ["good", "measured"], declined: ["", "declined"] };
+function missionCard(m) {
+  const state = { active: ["info", "in progress"], ready: ["warn", "ready to leave"], signed_off: ["good", "signed off"] }[m.state] ?? ["", m.state];
+  const rows = m.targets.map((t) => {
+    const [cls, word] = TARGET_CHIP[t.status] ?? ["", t.status];
+    return `<li><span class="chip ${cls}">${esc(word)}</span><div class="grow"><strong>${esc(t.name)}</strong>
+      <div class="meta">${esc(t.kind)}${t.stations.length ? ` · ${t.stations.length} station${t.stations.length === 1 ? "" : "s"}` : ""}${t.note ? ` · ${esc(t.note)}` : ""}</div></div></li>`;
+  }).join("");
+  const n = (s) => m.targets.filter((t) => t.status === s).length;
+  const tally = ["covered", "measured", "declined", "open"].filter((s) => n(s)).map((s) => `${n(s)} ${s}`).join(" · ") || "no targets yet";
+  return `<div class="card mission ${m.state === "ready" ? "attn" : ""}">
+    <div class="line top-align"><strong class="grow">${esc(m.goal)}</strong><span class="chip ${state[0]}">${esc(state[1])}</span></div>
+    <div class="meta">Done when: ${esc(m.done_when)}</div>
+    <div class="meta">${esc(tally)}</div>
+    ${rows ? `<ul class="ledger">${rows}</ul>` : ""}
+    ${m.state === "ready" ? `<div class="note">${esc(m.ready_summary ?? "")}</div>
+      ${isOp() ? `<button class="btn good wide" data-act="mission-sign-off" data-id="${esc(m.project_id)}" ${S.busy ? "disabled" : ""}>Sign off the job</button>` : `<p class="hint">Waiting for an operator to sign it off.</p>`}` : ""}
+    ${m.state === "signed_off" ? `<div class="meta">Signed off by ${esc(m.signed_off_by)} · ${esc(ago(m.signed_off_at))}${m.confirmed_via ? ` · ${esc(m.confirmed_via)}` : ""}</div>` : ""}
+  </div>`;
 }
 
 // The agent's proposal for where to set up next: the picture and its directions.
@@ -335,6 +359,8 @@ function onEvent(chunk) {
         location.hash = `#/view/${encodeURIComponent(v.result.scan_id)}`;
       }
     }
+  } else if (kind === "mission") {
+    S.missions = [v, ...S.missions.filter((m) => m.project_id !== v.project_id)];
   } else if (kind === "next_station") {
     S.nextStations = [v, ...S.nextStations.filter((p) => p.scan_id !== v.scan_id)];
   } else if (kind === "run") {
@@ -378,7 +404,7 @@ async function stream() {
 }
 
 function refreshAll() {
-  ["status", "jobs", "runs", "recipes", "projects", "modes", "log", "scans", "grants", "next-stations"].forEach(load);
+  ["status", "jobs", "runs", "recipes", "projects", "modes", "log", "scans", "grants", "next-stations", "missions"].forEach(load);
 }
 
 // ----------------------------------------------------------------- routes ---
@@ -543,8 +569,9 @@ function viewNow() {
     <h2>Now</h2><section>${active.length ? active.map((j) => jobCard(j)).join("") : `<p class="empty">Nothing running.</p>`}
       ${canAct() ? `<button class="btn primary wide" data-act="sheet-scan">New full-dome scan</button>` : ""}</section>
     </div><div>
-    ${(() => { const p = S.nextStations.find((x) => !S.project || x.project_id === S.project) ?? S.nextStations[0]; return p ? `<h2 class="first">Next station</h2><section>${nextStationCard(p)}</section>` : ""; })()}
-    <h2 class="${S.nextStations.length ? "" : "first"}">Needs you</h2><section>${needs.length ? needs.join("") : `<p class="empty">Nothing needs you.</p>`}</section>
+    ${(() => { const m = S.missions.find((x) => x.project_id === S.project) ?? S.missions[0]; return m ? `<h2 class="first">Mission</h2><section>${missionCard(m)}</section>` : ""; })()}
+    ${(() => { const p = S.nextStations.find((x) => !S.project || x.project_id === S.project) ?? S.nextStations[0]; return p ? `<h2 class="${S.missions.length ? "" : "first"}">Next station</h2><section>${nextStationCard(p)}</section>` : ""; })()}
+    <h2 class="${S.nextStations.length || S.missions.length ? "" : "first"}">Needs you</h2><section>${needs.length ? needs.join("") : `<p class="empty">Nothing needs you.</p>`}</section>
     ${recent.length ? `<h2>Recent</h2><section>${recent.map((j) => jobCard(j, { actions: false })).join("")}</section>` : ""}
     </div></div>`;
 }
@@ -1035,6 +1062,11 @@ const actions = {
   "sheet-scan": () => { S.sheet = { type: "scan" }; load("projects"); render(true); },
   "sheet-run": (el) => { S.sheet = { type: "run", id: el.dataset.id }; load("projects"); render(true); },
   "sheet-project": () => { S.sheet = { type: "project" }; render(true); },
+  "mission-sign-off": (el) => {
+    if (!confirm("Sign off this job? Do it only once you've checked the ledger: nothing more will be added to it.")) return;
+    return act(() => api(`/projects/${encodeURIComponent(el.dataset.id)}/mission/sign-off`, { method: "POST", body: { confirmed_via: "web UI" } })
+      .then((m) => { S.missions = [m, ...S.missions.filter((x) => x.project_id !== m.project_id)]; }), "Job signed off");
+  },
   "approve-run": (el) => act(() => api(`/jobs/${encodeURIComponent(el.dataset.id)}/approve`, { method: "POST", body: { run: true } }).then((j) => { upsert(S.jobs, j, "job_id"); load("grants"); }), "Run approved"),
   "grant-project": () => act(async () => {
     const expires = new Date(Date.now() + GRANT_HOURS * 3600e3).toISOString().replace(/\.\d+Z$/, "Z");

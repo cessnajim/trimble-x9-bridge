@@ -343,6 +343,36 @@ try:
               and "next_station" in events, (s, ns, s2, ctype))
         s, _ = call("PUT", f"/scans/{sc2['scan_id']}/next-station", "agent", {**prop, "marker": {"x": 100, "y": 100}})
         check("a proposal on the area scan too", s == 200, s)
+    # Missions: the goal, the ledger, ready to leave, one sign-off.
+    s, b = call("PUT", f"/projects/{pid}/mission", "viewer", {"goal": "x", "kind": "exterior", "done_when": "y"})
+    check("viewer can't set a mission (403)", s == 403, b)
+    s, ms = call("PUT", f"/projects/{pid}/mission", "agent", {"goal": "Scan the exterior of the house", "kind": "exterior",
+                 "done_when": "Every facade seen, no shadow on the house walls",
+                 "targets": [{"target_id": "north", "name": "North facade", "kind": "facade"}]})
+    check("an agent sets the mission with its first target", s == 200 and ms["state"] == "active" and ms["targets"][0]["status"] == "open"
+          and "mission" in events, ms)
+    s, b = call("POST", f"/projects/{pid}/mission/ready", "agent", {"summary": "done"})
+    check("ready to leave is refused while a target is open, naming it", s == 409 and "North facade" in b["detail"], b)
+    s, b = call("POST", f"/projects/{pid}/mission/targets", "agent", {"targets": [{"target_id": "north", "status": "covered", "stations": ["nope"]}]})
+    check("a covered target must name scans of this project", s == 400 and "not in this project" in b["detail"], b)
+    s, ms = call("POST", f"/projects/{pid}/mission/targets", "agent", {"targets": [
+        {"target_id": "north", "status": "covered", "stations": [station_scan]},
+        {"target_id": "south", "name": "South facade", "status": "declined", "note": "neighbour's yard, locked"}]})
+    s2, ms = call("POST", f"/projects/{pid}/mission/ready", "agent", {"summary": "North from station 1; south declined (locked yard)."})
+    s3, b = call("POST", f"/projects/{pid}/mission/sign-off", "agent", {})
+    check("agents can't sign a job off (403)", s3 == 403, b)
+    s4, ms = call("POST", f"/projects/{pid}/mission/sign-off", "operator", {"confirmed_via": "web UI"})
+    check("ledger settled, ready, then the operator signs it off", s == 200 and s2 == 200 and s4 == 200 and ms["state"] == "signed_off"
+          and ms["signed_off_by"] == "operator-1" and ms["confirmed_via"] == "web UI", (s, s2, s4, ms))
+    s, b = call("POST", f"/projects/{pid}/mission/targets", "agent", {"targets": [{"target_id": "west", "name": "West facade"}]})
+    check("a signed-off mission doesn't change (409)", s == 409, b)
+    _, log = call("GET", f"/log?project_id={pid}", "viewer")
+    check("the mission's sign-off is in the field log with its tally", any("Mission signed off" in e["text"] and "1 covered, 1 declined" in e["text"]
+          for e in log), [e["text"] for e in log][-4:])
+    missions_file = os.path.join(tmp, "data", "missions.json")
+    check("missions are saved for a restart", os.path.exists(missions_file)
+          and json.load(open(missions_file))[0]["state"] == "signed_off", os.path.exists(missions_file))
+
     # --- recipes and runs ---
     s, rl = call("GET", "/recipes", "viewer")
     check("recipes listed, the broken one skipped", s == 200 and sorted(r["recipe_id"] for r in rl) == ["log-note", "window-measurement"], rl)

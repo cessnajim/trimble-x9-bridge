@@ -52,6 +52,8 @@ pub struct Inner {
     pub measurement_files: HashMap<String, std::path::PathBuf>,
     /// The agent's latest next-station proposal per scan: its JSON and picture.
     pub next_stations: HashMap<String, (Value, Vec<u8>)>,
+    /// Each project's mission (what the job is for, and its ledger).
+    pub missions: HashMap<String, crate::mission::Mission>,
     pub runs: HashMap<String, crate::runs::RunRecord>,
     /// Scanner tasks the bridge cancelled that may still be listed in `/tasks`.
     pub cancelled_tasks: HashSet<i64>,
@@ -170,6 +172,38 @@ impl AppState {
         let n = live.len();
         self.inner.lock().unwrap().grants = live;
         n
+    }
+
+    /// Write the missions to `missions.json` (after every change), so a
+    /// restart keeps the job's ledger.
+    pub fn save_missions(&self) {
+        let ms: Vec<crate::mission::Mission> = self.inner.lock().unwrap().missions.values().cloned().collect();
+        let path = self.data_dir.join("missions.json");
+        let tmp = path.with_extension(format!("json.{}", new_id("tmp")));
+        let res = serde_json::to_vec_pretty(&ms)
+            .map_err(std::io::Error::other)
+            .and_then(|b| std::fs::write(&tmp, b))
+            .and_then(|_| std::fs::rename(&tmp, &path));
+        if let Err(e) = res {
+            let _ = std::fs::remove_file(&tmp);
+            self.log("error", format!("Could not save missions: {e}"), "bridge", None, &[]);
+        }
+    }
+
+    /// Load the missions saved before a restart. Returns how many.
+    pub fn load_missions(&self) -> usize {
+        let Ok(bytes) = std::fs::read(self.data_dir.join("missions.json")) else { return 0 };
+        match serde_json::from_slice::<Vec<crate::mission::Mission>>(&bytes) {
+            Ok(ms) => {
+                let n = ms.len();
+                self.inner.lock().unwrap().missions = ms.into_iter().map(|m| (m.project_id.clone(), m)).collect();
+                n
+            }
+            Err(e) => {
+                self.log("error", format!("Ignoring missions.json: {e}"), "bridge", None, &[]);
+                0
+            }
+        }
     }
 
     /// Who is calling, from `Authorization: Bearer <token>`.

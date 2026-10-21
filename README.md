@@ -25,6 +25,10 @@ trademarks of their respective owners.
 - **Exports:** levelled PLY, LAS or COPC (Cloud Optimized Point Cloud) via
   [trimble-tzf](https://github.com/northidaholabs/trimble-tzf), with automatic
   checks (point count, levelled, coordinates).
+- **Missions:** the person's goal for the job, the agent's done-when
+  criteria and a ledger of targets (each facade, each window): covered,
+  measured or declined. "Ready to leave" is refused while anything is open;
+  the person signs the job off once. Saved across restarts.
 - **Next-station proposals:** the agent marks where to set up next on the
   station's preview (a tripod on the ground, labels for what was seen and
   what is hidden, landmarks to walk by) with directions in prose; the bridge
