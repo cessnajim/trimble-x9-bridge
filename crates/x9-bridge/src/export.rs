@@ -1,5 +1,5 @@
 //! Exports: decode a scan with `trimble-tzf` into levelled points, add
-//! intensity, write PLY or LAS, and run the automatic checks.
+//! intensity, write PLY, LAS or COPC, and run the automatic checks.
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -11,6 +11,9 @@ use std::path::Path;
 pub enum Format {
     Ply,
     Las,
+    /// Cloud Optimized Point Cloud: LAZ-compressed LAS 1.4 in an octree, so
+    /// viewers can stream it level by level.
+    Copc,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
@@ -31,10 +34,20 @@ pub struct ExportRequest {
 }
 
 impl Format {
-    pub fn ext(self) -> &'static str {
+    /// The format's name, as requests and exports spell it.
+    pub fn name(self) -> &'static str {
         match self {
             Format::Ply => "ply",
             Format::Las => "las",
+            Format::Copc => "copc",
+        }
+    }
+
+    /// The file extension.
+    pub fn ext(self) -> &'static str {
+        match self {
+            Format::Copc => "copc.laz",
+            f => f.name(),
         }
     }
 }
@@ -94,21 +107,13 @@ pub fn run(tzf: &Path, preview: Option<&[u8]>, req: &ExportRequest, out: &Path, 
         (Intensity::Preview, None) => return Err(bad("no preview available for intensity".into())),
         (_, None) => ("none", None),
     };
-    let (rows, cols) = (meta.grid_rows as usize, meta.grid_cols as usize);
-    let g = |p: &trimble_tzf::GridPoint| -> u8 {
-        match &gray {
-            Some((w, h, px)) => {
-                let x = (p.col as usize * w / cols.max(1)).min(w - 1);
-                let y = (p.row as usize * h / rows.max(1)).min(h - 1);
-                px[y * w + x]
-            }
-            None => 128,
-        }
-    };
+    let grey = Grey::new(&meta, gray);
+    let g = |p: &trimble_tzf::GridPoint| grey.of(p);
 
     match req.format {
         Format::Ply => write_ply(out, &pts, &g, stop),
         Format::Las => write_las(out, &pts, &g, stop),
+        Format::Copc => write_copc(out, &pts, &g, stop),
     }
     .map_err(|e| if e.kind() == std::io::ErrorKind::Interrupted && stop() { Failure::Cancelled } else { Failure::Write(e) })?;
 
@@ -144,12 +149,37 @@ pub fn run(tzf: &Path, preview: Option<&[u8]>, req: &ExportRequest, out: &Path, 
     ];
     let bytes = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
     Ok(json!({
-        "format": req.format.ext(),
+        "format": req.format.name(),
         "point_count": pts.len(),
         "bytes": bytes,
         "bounds_m": {"min": lo, "max": hi},
         "checks": checks,
     }))
+}
+
+/// Grey level of a grid point, from a grid-aligned preview (decoded with
+/// `aim::jpeg_luma`); mid-grey without one.
+pub struct Grey {
+    img: Option<(usize, usize, Vec<u8>)>,
+    rows: usize,
+    cols: usize,
+}
+
+impl Grey {
+    pub fn new(meta: &trimble_tzf::ScanMeta, img: Option<(usize, usize, Vec<u8>)>) -> Self {
+        Grey { img, rows: meta.grid_rows as usize, cols: meta.grid_cols as usize }
+    }
+
+    pub fn of(&self, p: &trimble_tzf::GridPoint) -> u8 {
+        match &self.img {
+            Some((w, h, px)) => {
+                let x = (p.col as usize * w / self.cols.max(1)).min(w - 1);
+                let y = (p.row as usize * h / self.rows.max(1)).min(h - 1);
+                px[y * w + x]
+            }
+            None => 128,
+        }
+    }
 }
 
 fn write_ply(path: &Path, pts: &[trimble_tzf::GridPoint], gray: &dyn Fn(&trimble_tzf::GridPoint) -> u8, stop: &dyn Fn() -> bool) -> std::io::Result<()> {
@@ -236,6 +266,144 @@ fn write_las(path: &Path, pts: &[trimble_tzf::GridPoint], gray: &dyn Fn(&trimble
     w.flush()
 }
 
+/// The scanner's levelled frame (metres, z up, origin at the instrument):
+/// there is no map projection until stations are registered, so COPC files
+/// carry this local CRS.
+const LOCAL_WKT: &str = r#"LOCAL_CS["X9 scanner frame, levelled",LOCAL_DATUM["scanner origin",0],UNIT["metre",1],AXIS["X",EAST],AXIS["Y",NORTH],AXIS["Z",UP]]"#;
+
+/// COPC 1.0: LAS 1.4, point format 6, LAZ chunks in an octree, 0.1 mm scale.
+fn write_copc(path: &Path, pts: &[trimble_tzf::GridPoint], gray: &dyn Fn(&trimble_tzf::GridPoint) -> u8, stop: &dyn Fn() -> bool) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    const SCALE: f64 = 0.0001;
+    let err = |e: &dyn std::fmt::Display| Error::other(format!("COPC: {e}"));
+    if pts.is_empty() {
+        return Err(Error::new(ErrorKind::InvalidInput, "COPC: the scan has no points"));
+    }
+    let mut min = [f64::MAX; 3];
+    for p in pts {
+        for (k, v) in [p.point.x, p.point.y, p.point.z].into_iter().enumerate() {
+            min[k] = min[k].min(v as f64);
+        }
+    }
+    // Snap to the file's grid first so the header's bounds hold every point
+    // exactly as stored.
+    let q = |v: f32, k: usize| min[k] + (((v as f64) - min[k]) / SCALE).round() * SCALE;
+    let point = |p: &trimble_tzf::GridPoint| las::Point {
+        x: q(p.point.x, 0),
+        y: q(p.point.y, 1),
+        z: q(p.point.z, 2),
+        intensity: gray(p) as u16 * 257,
+        return_number: 1,
+        number_of_returns: 1,
+        gps_time: Some(0.0),
+        ..Default::default()
+    };
+    let mut b = las::Builder::from((1, 4));
+    b.point_format = las::point::Format::new(6).map_err(|e| err(&e))?;
+    b.generating_software = "x9-bridge".into();
+    b.system_identifier = "Trimble X9 via x9-bridge".into();
+    let t = |k: usize| las::Transform { scale: SCALE, offset: min[k] };
+    b.transforms = las::Vector { x: t(0), y: t(1), z: t(2) };
+    b.has_wkt_crs = true;
+    b.vlrs.push(las::Vlr { user_id: "LASF_Projection".into(), record_id: 2112, description: "OGC WKT coordinate system".into(), data: LOCAL_WKT.as_bytes().to_vec() });
+    let mut header = b.into_header().map_err(|e| err(&e))?;
+    for p in pts {
+        header.add_point(&point(p));
+    }
+    let file = BufWriter::new(std::fs::File::create(path)?);
+    let mut w = copc_rs::CopcWriter::new(file, header, -1, -1).map_err(|e| err(&e))?;
+    let asked = std::cell::Cell::new(false);
+    let points = pts.iter().enumerate().map_while(|(i, p)| {
+        if i % STOP_EVERY == 0 && stop() {
+            asked.set(true);
+            return None;
+        }
+        Some(point(p))
+    });
+    let res = w.write(points, pts.len().min(i32::MAX as usize) as i32);
+    drop(w);
+    if asked.get() {
+        return Err(stopped());
+    }
+    res.map_err(|e| err(&e))?;
+    fill_hierarchy(path).map(|_| ())
+}
+
+/// copc-rs 0.5 leaves a node out of the hierarchy when it holds no points,
+/// even if its children do; readers walk the hierarchy down from the root
+/// (PDAL, laspy) and never reach those children, losing their points. Add
+/// every missing ancestor as an empty entry (the COPC spec allows point
+/// count 0). The hierarchy page is the file's last record, so it grows in
+/// place. Returns how many entries were added.
+pub fn fill_hierarchy(path: &Path) -> std::io::Result<usize> {
+    use std::collections::HashSet;
+    use std::io::{Error, Read, Seek, SeekFrom};
+    // LAS 1.4 header (375 bytes), then the COPC info VLR: a 54-byte VLR
+    // header and 160 bytes of info, with the hierarchy's offset and size at
+    // 40 and 48.
+    const INFO: u64 = 375 + 54;
+    let mut f = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+    let mut info = [0u8; 160];
+    f.seek(SeekFrom::Start(INFO))?;
+    f.read_exact(&mut info)?;
+    let off = u64::from_le_bytes(info[40..48].try_into().unwrap());
+    let size = u64::from_le_bytes(info[48..56].try_into().unwrap());
+    if off + size != f.metadata()?.len() || size % 32 != 0 {
+        return Err(Error::other("COPC: the hierarchy is not the last record; can't complete it"));
+    }
+    let mut page = vec![0u8; size as usize];
+    f.seek(SeekFrom::Start(off))?;
+    f.read_exact(&mut page)?;
+    let key = |e: &[u8]| -> [i32; 4] { std::array::from_fn(|k| i32::from_le_bytes(e[k * 4..k * 4 + 4].try_into().unwrap())) };
+    let have: HashSet<[i32; 4]> = page.chunks(32).map(key).collect();
+    let mut add: Vec<[i32; 4]> = Vec::new();
+    let mut seen = have.clone();
+    for k in &have {
+        let mut k = *k;
+        while k[0] > 0 {
+            k = [k[0] - 1, k[1] >> 1, k[2] >> 1, k[3] >> 1];
+            if !seen.insert(k) {
+                break;
+            }
+            add.push(k);
+        }
+    }
+    if add.is_empty() {
+        return Ok(0);
+    }
+    add.sort();
+    let mut extra = Vec::with_capacity(add.len() * 32);
+    for k in &add {
+        for v in k {
+            extra.extend_from_slice(&v.to_le_bytes());
+        }
+        extra.extend_from_slice(&[0u8; 16]); // offset 0, byte size 0, point count 0
+    }
+    f.seek(SeekFrom::End(0))?;
+    f.write_all(&extra)?;
+    let new_size = size + extra.len() as u64;
+    // The EVLR header's record length (at 20 of its 60 bytes), and the info's size.
+    f.seek(SeekFrom::Start(off - 60 + 20))?;
+    f.write_all(&new_size.to_le_bytes())?;
+    f.seek(SeekFrom::Start(INFO + 48))?;
+    f.write_all(&new_size.to_le_bytes())?;
+    f.flush()?;
+    Ok(add.len())
+}
+
+/// Hierarchy entries whose parent is missing (for tests).
+#[cfg(test)]
+fn orphans(path: &Path) -> usize {
+    let b = std::fs::read(path).unwrap();
+    let off = u64::from_le_bytes(b[375 + 54 + 40..375 + 54 + 48].try_into().unwrap()) as usize;
+    let size = u64::from_le_bytes(b[375 + 54 + 48..375 + 54 + 56].try_into().unwrap()) as usize;
+    let keys: std::collections::HashSet<[i32; 4]> = b[off..off + size]
+        .chunks(32)
+        .map(|e| std::array::from_fn(|k| i32::from_le_bytes(e[k * 4..k * 4 + 4].try_into().unwrap())))
+        .collect();
+    keys.iter().filter(|k| k[0] > 0 && !keys.contains(&[k[0] - 1, k[1] >> 1, k[2] >> 1, k[3] >> 1])).count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,7 +411,7 @@ mod tests {
     use trimble_tzf::{GridPoint, Point};
 
     fn pts(n: usize) -> Vec<GridPoint> {
-        (0..n).map(|i| GridPoint { point: Point { x: i as f32, y: 1.0, z: 2.0, intensity: 0.0 }, row: 0, col: i as u32 }).collect()
+        (0..n).map(|i| GridPoint { point: Point { x: i as f32, y: 1.0 + (i % 3) as f32 * 0.01, z: 2.0 + (i % 5) as f32 * 0.01, intensity: 0.0 }, row: 0, col: i as u32 }).collect()
     }
 
     #[test]
@@ -252,7 +420,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let p = pts(3 * STOP_EVERY);
         let grey = |_: &GridPoint| 128u8;
-        for (name, w) in [("a.ply", write_ply as fn(&Path, &[GridPoint], &dyn Fn(&GridPoint) -> u8, &dyn Fn() -> bool) -> std::io::Result<()>), ("a.las", write_las)] {
+        for (name, w) in [("a.ply", write_ply as fn(&Path, &[GridPoint], &dyn Fn(&GridPoint) -> u8, &dyn Fn() -> bool) -> std::io::Result<()>), ("a.las", write_las), ("a.copc.laz", write_copc)] {
             let out = dir.join(name);
             // Asked to stop after the first batch.
             let polls = Cell::new(0);
@@ -266,8 +434,61 @@ mod tests {
             // Never asked: every point is written.
             w(&out, &p, &grey, &|| false).unwrap();
             let len = std::fs::metadata(&out).unwrap().len() as usize;
-            assert!(len > p.len() * 15, "{name}: {len}");
+            // COPC is compressed; the others are 15+ bytes a point.
+            assert!(len > if name.ends_with("laz") { 1000 } else { p.len() * 15 }, "{name}: {len}");
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn copc_reads_back() {
+        let dir = std::env::temp_dir().join(crate::util::new_id("x9-copc"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("a.copc.laz");
+        let p: Vec<GridPoint> = (0..50_000)
+            .map(|i| GridPoint { point: Point { x: (i % 250) as f32 * 0.01, y: (i / 250) as f32 * 0.01, z: 1.5 + (i % 7) as f32 * 0.001, intensity: 0.0 }, row: i / 250, col: i % 250 })
+            .collect();
+        write_copc(&out, &p, &|g| (g.col % 256) as u8, &|| false).unwrap();
+        let mut r = copc_rs::CopcReader::from_path(&out).unwrap();
+        assert!(r.num_entries() > 0);
+        let got: Vec<las::Point> = r.points(copc_rs::LodSelection::All, copc_rs::BoundsSelection::All).unwrap().collect();
+        assert_eq!(got.len(), p.len());
+        assert!(r.header().has_wkt_crs());
+        let top = got.iter().map(|q| q.x).fold(f64::MIN, f64::max);
+        assert!((top - 2.49).abs() < 1e-6, "{top}");
+        // Intensity and coordinates survive, to the file's 0.1 mm grid.
+        let a = got.iter().find(|q| (q.x - 1.23).abs() < 1e-6 && (q.y - 0.5).abs() < 1e-6).expect("point (1.23, 0.5)");
+        assert_eq!(a.intensity, 123 * 257);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn every_copc_node_is_reachable_from_the_root() {
+        let dir = std::env::temp_dir().join(crate::util::new_id("x9-copc2"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("b.copc.laz");
+        // What a scanner sees: rays on an angular grid from the origin to the
+        // walls of an off-centre box room, so density falls off with range
+        // and the far corners are sparse (where copc-rs left nodes orphaned).
+        let (lo, hi) = ([-3.0f64, -2.0, -1.3], [7.0f64, 4.0, 1.2]);
+        let mut p = Vec::new();
+        let (rows, cols) = (700u32, 2100u32);
+        for r in 0..rows {
+            let va = 0.05 + (r as f64 + 0.5) / rows as f64 * (std::f64::consts::PI - 0.1);
+            for c in 0..cols {
+                let ha = c as f64 / cols as f64 * std::f64::consts::TAU;
+                let d = [va.sin() * ha.cos(), va.sin() * ha.sin(), va.cos()];
+                let t = (0..3).map(|k| if d[k] > 0.0 { hi[k] / d[k] } else if d[k] < 0.0 { lo[k] / d[k] } else { f64::MAX }).fold(f64::MAX, f64::min);
+                p.push(GridPoint { point: Point { x: (d[0] * t) as f32, y: (d[1] * t) as f32, z: (d[2] * t) as f32, intensity: 0.0 }, row: r, col: c });
+            }
+        }
+        write_copc(&out, &p, &|_| 0, &|| false).unwrap();
+        assert_eq!(orphans(&out), 0);
+        let mut r = copc_rs::CopcReader::from_path(&out).unwrap();
+        let n = r.points(copc_rs::LodSelection::All, copc_rs::BoundsSelection::All).unwrap().count();
+        assert_eq!(n, p.len());
+        // Completing it again adds nothing.
+        assert_eq!(fill_hierarchy(&out).unwrap(), 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

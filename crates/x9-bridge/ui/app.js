@@ -1,6 +1,8 @@
-// X9 Bridge phone UI. Plain modules, no build step, no network beyond the bridge:
+// X9 Bridge web UI. Plain modules, no build step, no network beyond the bridge:
 // the Pi has no internet in the field. Every API call sends the token; the
 // event stream is read with fetch so it can send it too.
+
+import { createViewer } from "./viewer.js";
 
 const PHASES = {
   waiting: "Waiting for the scanner to clear the last task",
@@ -287,7 +289,14 @@ function onEvent(chunk) {
     S.jobs.sort(byNewest);
     if (v.kind === "export" && v.state === "succeeded" && v.result?.export_id && !S.exports[v.result.export_id]) loadExport(v.result.export_id);
     if (v.kind === "measure" && v.state === "succeeded" && v.result?.measurement_id && !S.measurements[v.result.measurement_id]) loadMeasurement(v.result.measurement_id);
-    if (v.kind === "scan" && v.state === "succeeded") { load("projects"); load("scans"); load("status"); }
+    if (v.kind === "scan" && v.state === "succeeded") {
+      load("projects"); load("scans"); load("status");
+      // The viewer follows the project it is showing: open each new scan as it lands.
+      const showing = viewer?.scanId && S.scanById[viewer.scanId];
+      if (S.route.view && viewer.follow && v.result?.scan_id && showing && v.request?.project_id === showing.project_id && v.result.scan_id !== viewer.scanId) {
+        location.hash = `#/view/${encodeURIComponent(v.result.scan_id)}`;
+      }
+    }
   } else if (kind === "run") {
     upsert(S.runs, v, "run_id");
     S.runs.sort(byNewest);
@@ -337,6 +346,7 @@ function parseRoute() {
   const [tab, id] = location.hash.replace(/^#\/?/, "").split("/");
   if (tab === "run" && id) return { tab: "runs", run: decodeURIComponent(id) };
   if (tab === "scan" && id) return { tab: "scans", scan: decodeURIComponent(id) };
+  if (tab === "view" && id) return { tab: "scans", scan: decodeURIComponent(id), view: true };
   return { tab: ["now", "runs", "scans", "log"].includes(tab) ? tab : "now" };
 }
 
@@ -628,7 +638,8 @@ function viewScans() {
     <label class="field" style="margin-top:0"><span>Project</span>
       <select data-change="project"><option value="">Choose a project…</option>${opts}</select></label>
     ${canAct() ? `<div class="btns"><button class="btn" data-act="sheet-project">New project</button>
-      <button class="btn primary" data-act="sheet-scan" ${S.project ? "" : "disabled"}>New scan</button></div>` : ""}</div>`;
+      <button class="btn primary" data-act="sheet-scan" ${S.project ? "" : "disabled"}>New scan</button></div>` : ""}
+    ${S.project && S.scans.length ? `<a class="btn wide" href="#/view/${encodeURIComponent([...S.scans].sort(byNewest)[0].scan_id)}">View the latest scan, and follow new ones</a>` : ""}</div>`;
   if (!S.project) return head;
   const stations = new Map();
   for (const s of S.scans) {
@@ -674,6 +685,7 @@ function viewScan(id) {
       <h3>${esc(title)}</h3>
       <div class="meta">${esc(s.mode ?? "")} · ${num(s.point_count)} points${s.created_at ? ` · ${esc(clock(s.created_at))}` : ""}${s.window ? ` · window ${deg(s.window.delta_ha)} × ${deg(s.window.delta_va)}` : ""}</div>
       ${partialOf ? `<div class="note">This is the partial sweep of a cancelled scan.</div>` : ""}
+      <a class="btn primary wide" style="margin-top:12px" href="#/view/${encodeURIComponent(id)}">View the points</a>
     </div></section>
     <h2>Aim an area scan</h2>
     <section class="card">
@@ -701,7 +713,8 @@ function viewScan(id) {
         <ul class="steps">${(ex.checks || []).map((c) => `<li><span class="dot ${c.ok ? "done" : "failed"}">${c.ok ? "✓" : "×"}</span><div class="grow"><strong>${esc(CHECKS[c.name] ?? c.name)}</strong><div class="meta">${esc(c.detail ?? "")}</div></div></li>`).join("")}</ul>
         <button class="btn primary wide" data-act="dl-export" data-id="${esc(exportId)}">Download ${esc(ex.format?.toUpperCase())}</button>` : ""}
       ${canAct() ? `<div class="btns"><button class="btn" data-act="export" data-id="${esc(id)}" data-format="ply" ${S.busy ? "disabled" : ""}>Export PLY</button>
-        <button class="btn" data-act="export" data-id="${esc(id)}" data-format="las" ${S.busy ? "disabled" : ""}>Export LAS</button></div>` : ""}
+        <button class="btn" data-act="export" data-id="${esc(id)}" data-format="las" ${S.busy ? "disabled" : ""}>Export LAS</button>
+        <button class="btn" data-act="export" data-id="${esc(id)}" data-format="copc" ${S.busy ? "disabled" : ""}>Export COPC</button></div>` : ""}
       <div class="btns"><button class="btn" data-act="dl-tzf" data-id="${esc(id)}">Download raw .tzf</button></div>
     </section>
     ${isOp() ? `<h2>Delete</h2><section><button class="btn danger wide" data-act="delete-scan" data-id="${esc(id)}" ${S.busy ? "disabled" : ""}>Delete this scan from the scanner</button></section>` : ""}`;
@@ -828,6 +841,7 @@ function render(force = false) {
     if (el.type === "checkbox") el.checked = fields[k]; else el.value = fields[k];
     if (k === focusKey) el.focus({ preventScroll: true });
   });
+  syncViewer();
   root.querySelectorAll("img[data-dims]").forEach((img) => {
     const set = () => {
       const id = img.dataset.dims;
@@ -838,6 +852,26 @@ function render(force = false) {
   });
 }
 document.addEventListener("focusout", () => setTimeout(() => { if (pending) render(); }, 0));
+
+// ----------------------------------------------------------------- viewer ---
+let viewer = null;
+function syncViewer() {
+  const r = S.route;
+  if (!r.view || !S.me) { viewer?.close(); return; }
+  if (!viewer) {
+    viewer = createViewer(document.getElementById("viewer"), {
+      fetchRaw: (path) => api(path, { raw: true }),
+      fetchJson: (path) => api(path),
+      onClose: () => { location.hash = `#/scan/${encodeURIComponent(S.route.scan)}`; },
+    });
+  }
+  const scan = S.scans.find((x) => x.scan_id === r.scan) ?? S.scanById[r.scan];
+  viewer.open(r.scan, scan);
+  // A scan in progress in the same project, for the live line.
+  const pid = scan?.project_id;
+  const j = pid && S.jobs.find((x) => x.kind === "scan" && x.request?.project_id === pid && ["queued", "awaiting_approval", "running"].includes(x.state));
+  viewer.setLive(j ? `${describeJob(j)}: ${j.state === "running" ? (PHASES[j.phase] ?? "running") : j.state.replace("_", " ")}${viewer.follow ? " · opens here when it's done" : ""}` : "");
+}
 
 // ---------------------------------------------------------------- drawing ---
 function pointIn(el, e, dims) {

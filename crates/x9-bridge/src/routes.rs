@@ -45,6 +45,9 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/v1/scans/:scan_id", get(get_scan).delete(delete_scan))
         .route("/v1/scans/:scan_id/preview", get(scan_preview))
         .route("/v1/scans/:scan_id/tzf", get(scan_tzf))
+        .route("/v1/scans/:scan_id/view", get(scan_view))
+        .route("/v1/scans/:scan_id/coverage", get(scan_coverage))
+        .route("/v1/scans/:scan_id/coverage/image", get(scan_coverage_image))
         .route("/v1/scans/:scan_id/exports", post(start_export))
         .route("/v1/exports/:export_id", get(get_export))
         .route("/v1/exports/:export_id/file", get(get_export_file))
@@ -417,6 +420,39 @@ async fn scan_tzf(State(st): St, h: HeaderMap, Path(id): Path<String>) -> ApiRes
     let bytes = tokio::fs::read(&p).await.map_err(io_err)?;
     let disp = format!("attachment; filename=\"{id}.tzf\"");
     Ok(([(header::CONTENT_TYPE, "application/octet-stream".to_string()), (header::CONTENT_DISPOSITION, disp)], bytes).into_response())
+}
+
+#[derive(Deserialize)]
+struct ViewQuery {
+    max_points: Option<usize>,
+}
+
+/// Thinned points for the viewer, in the `X9V1` binary format (see `view.rs`).
+async fn scan_view(State(st): St, h: HeaderMap, Path(id): Path<String>, Query(q): Query<ViewQuery>) -> ApiResult<Response> {
+    use crate::files::{view_file, ViewPart, VIEW_POINTS};
+    st.caller(&h)?;
+    let max = q.max_points.unwrap_or(VIEW_POINTS).clamp(10_000, 8_000_000);
+    let p = view_file(&st, &id, ViewPart::Points(max)).await?;
+    let bytes = tokio::fs::read(&p).await.map_err(io_err)?;
+    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response())
+}
+
+async fn scan_coverage(State(st): St, h: HeaderMap, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    use crate::files::{view_file, ViewPart};
+    st.caller(&h)?;
+    let p = view_file(&st, &id, ViewPart::Coverage).await?;
+    let bytes = tokio::fs::read(&p).await.map_err(io_err)?;
+    let mut v: Value = serde_json::from_slice(&bytes).map_err(|e| ApiError::cache(format!("coverage: {e}")))?;
+    v["image_url"] = json!(format!("/v1/scans/{id}/coverage/image"));
+    Ok(Json(v))
+}
+
+async fn scan_coverage_image(State(st): St, h: HeaderMap, Path(id): Path<String>) -> ApiResult<Response> {
+    use crate::files::{view_file, ViewPart};
+    st.caller(&h)?;
+    let p = view_file(&st, &id, ViewPart::Image).await?;
+    let bytes = tokio::fs::read(&p).await.map_err(io_err)?;
+    Ok(([(header::CONTENT_TYPE, "image/png")], bytes).into_response())
 }
 
 fn default_margin() -> f64 {

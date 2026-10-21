@@ -2,7 +2,7 @@
 
 A bridge service for the **Trimble X9** laser scanner: the one program that
 talks to the scanner, with one HTTP API every client uses — AI agents (through
-an MCP server), a phone web UI, a CLI, scripts. The safety rules live in the
+an MCP server), a web UI, a CLI, scripts. The safety rules live in the
 bridge, so no client can skip them.
 
 Independent interoperability project, documented from the scanner's own
@@ -22,8 +22,12 @@ trademarks of their respective owners.
   of scans (optionally limited to one recipe run). Deletes need an operator and
   an explicit confirmation.
 - **Aiming:** a box drawn on a scan's preview becomes an area-scan window.
-- **Exports:** levelled PLY / LAS via [trimble-tzf](https://github.com/northidaholabs/trimble-tzf),
-  with automatic checks (point count, levelled, coordinates).
+- **Exports:** levelled PLY, LAS or COPC (Cloud Optimized Point Cloud) via
+  [trimble-tzf](https://github.com/northidaholabs/trimble-tzf), with automatic
+  checks (point count, levelled, coordinates).
+- **Viewing and coverage:** thinned points for a browser viewer, and each
+  scan's coverage: point spacing and a plan of what the scanner saw and where
+  it was blocked (shadows), as JSON and an image an agent can look at.
 - **Recipes and runs:** TOML recipes of `action`, `person` and `check` steps;
   a run executes them under the starter's role.
 - **Field log** and a live event stream.
@@ -31,14 +35,15 @@ trademarks of their respective owners.
   uncertainty, checks and an evidence image, as a job or a recipe step.
 - **Proposals:** the agent answers a person step (finds the window, measures it)
   and a person confirms it with one tap.
-- **Phone web UI** at `/ui/`: approvals, live progress, recipe runs with box
-  drawing on previews, aiming, exports and the log, from a phone in the field.
+- **Web UI** at `/ui/`: approvals, live progress, recipe runs with box
+  drawing on previews, aiming, exports, the log, and a 3D point viewer with
+  the coverage overlay that follows each new scan while you are still on site.
 
 ## Documentation
 
 | Document | What |
 | --- | --- |
-| [docs/guide.md](docs/guide.md) | Install, configuration, tokens and roles, every workflow with `curl` examples (scans, approvals, grants, cancel, aiming, exports, deletes, field log, events), and the phone web UI |
+| [docs/guide.md](docs/guide.md) | Install, configuration, tokens and roles, every workflow with `curl` examples (scans, approvals, grants, cancel, aiming, exports, viewing and coverage, deletes, field log, events), and the web UI |
 | [docs/recipes.md](docs/recipes.md) | Recipe format v0 and how runs execute |
 | [docs/errors.md](docs/errors.md) | Every error `code`, its HTTP status, when it happens and its hint |
 | [docs/tools.md](docs/tools.md) | The `x9` CLI, the `x9-mock` simulator, and the tests |

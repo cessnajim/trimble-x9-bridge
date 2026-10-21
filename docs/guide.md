@@ -22,7 +22,7 @@ Related documents:
 5. [Roles](#roles)
 6. [Conventions](#conventions)
 7. [Workflows](#workflows)
-8. [Phone web UI](#phone-web-ui)
+8. [Web UI](#web-ui)
 9. [Events](#events)
 10. [Data directory and state](#data-directory-and-state)
 
@@ -32,7 +32,7 @@ The bridge is the one program that talks to the scanner. It runs on the
 computer next to the scanner (a Raspberry Pi on the tripod, or a desktop at
 the bench). It reaches the scanner API over USB or over the scanner's own
 Wi-Fi, and it serves an HTTP API at `/v1` to every client: AI agents through
-an MCP server, a phone web UI, scripts, `curl`.
+an MCP server, a web UI, scripts, `curl`.
 
 The safety rules live in the bridge, so no client can skip them: battery,
 storage, a busy scanner, a single scan queue, known scan modes, approvals for
@@ -664,13 +664,19 @@ curl -s -H "$H" -d '{"format":"ply","intensity":"auto"}' $B/scans/$SCAN/exports
 
 | Field | Values | What |
 | --- | --- | --- |
-| `format` | `ply`, `las` | Required |
+| `format` | `ply`, `las`, `copc` | Required |
 | `intensity` | `auto` (default), `scan`, `preview`, `none` | Where the grey value of each point comes from |
 
 - **Formats.** PLY: binary little-endian, `x y z` as 32-bit floats and
   `red green blue` as bytes (the same grey value three times). LAS: version
   1.2, point data format 0, 0.1 mm scale, offsets at the minimum corner,
-  intensity as 16-bit grey.
+  intensity as 16-bit grey. COPC (`exp_….copc.laz`): a Cloud Optimized Point
+  Cloud, i.e. LAS 1.4 point data format 6, LAZ-compressed in an octree, so
+  viewers (QGIS, CloudCompare, Potree, viewer.copc.io) can stream it level by
+  level; 0.1 mm scale, intensity as 16-bit grey, about a sixth the size of LAS
+  (a 6.3 M point full dome: 21 MB against 126 MB).
+  Its CRS is a local one (`LOCAL_CS["X9 scanner frame, levelled"]`): the
+  coordinates are not georeferenced until stations are registered.
 - **Levelling.** Points are always levelled: the decoder applies the tilt
   correction recorded in the scan file. There is no option to turn it off.
   Coordinates are metres in the scanner's own frame.
@@ -753,6 +759,63 @@ the opening is measured at the wall face (not the frame or the rough
 opening); it needs wall visible on all four sides; a measurement is kept in
 memory until the bridge restarts, its evidence image on disk; deleting the
 scan deletes its measurements.
+
+### View points and coverage
+
+Three read-only endpoints, for a viewer and for an agent deciding whether a
+station saw enough:
+
+```bash
+curl -s -H "$H" -o view.x9v $B/scans/$SCAN/view                    # thinned points (binary)
+curl -s -H "$H" -o view.x9v "$B/scans/$SCAN/view?max_points=500000"
+curl -s -H "$H" $B/scans/$SCAN/coverage                            # spacing and plan (JSON)
+curl -s -H "$H" -o plan.png $B/scans/$SCAN/coverage/image          # the plan (PNG)
+```
+
+The first request for a scan downloads its file (if not cached) and decodes
+it; the three results are written to the data directory and later requests
+are served from there. Builds run one at a time. On Fedora (x86) a 6.3 M point
+full dome takes about 0.6 s once the file is cached.
+
+**`/view`** keeps every *k*th row and column of the scan grid so that about
+`max_points` remain (default 2,000,000; 10,000 to 8,000,000). The body is
+`X9V1`, little-endian:
+
+| Offset | Type | What |
+| --- | --- | --- |
+| 0 | 4 bytes | `X9V1` |
+| 4 | u32 | point count *n* |
+| 8 | u32 | stride *k* |
+| 12 | f32 | the scan's angular step, radians (full resolution) |
+| 16 | *n* × 3 f32 | x, y, z (metres, levelled scanner frame) |
+| 16 + 12*n* | *n* u8 | grey (intensity from the preview, 128 without one) |
+| 16 + 13*n* | *n* u8 | spacing class at full resolution: 0 fine … 3 sparse |
+
+**`/coverage`**:
+
+| Field | What |
+| --- | --- |
+| `point_count`, `angle_step_rad` | The full scan |
+| `spacing_mm` | `p10`, `p50`, `p90` of point spacing at full resolution (range × angular step) |
+| `classes` | Share of points `fine` ≤ 6 mm, `good` ≤ 12 mm, `coarse` ≤ 25 mm, `sparse` beyond |
+| `plan` | A plan from above in 10 cm cells within 25 m of the scanner: `seen_m2`, `shadows_assessed`, `shadow_m2` and `shadow_share` (`null` unless assessed), `beyond_radius_share` (points farther than 25 m), `origin_m`, `width`, `height` |
+| `view` | Points and stride of the default view |
+| `image_url` | The plan image |
+
+A **shadow** cell got no points at any height although it is nearer than 90 %
+of the farthest return in its direction (½° bins, with their neighbours) and
+more than 1 m from the scanner (the tripod's blind circle): something stood
+between it and the scanner. Shadows are assessed only when the scan has
+returns in at least 90 % of directions (a full dome): an area scan's window
+leaves most of the room unlooked-at, which is not a shadow, so its
+`shadows_assessed` is `false`. Shadows behind furniture or a door are what the
+next station fills; a shadow beyond a wall is space seen into through a door
+or window but not covered. The **image** has x to the right and y up, one
+pixel per cell: green shades by spacing class (dark green fine … orange
+sparse), red shadow, dark nothing, and a white cross at the scanner. It shows
+coverage only, never intensity.
+
+Deleting a scan deletes its view and coverage files.
 
 ### Download the raw scan file
 
@@ -841,21 +904,22 @@ curl -s -X POST -H "$H" $B/runs/$RUN/cancel
 Only the run's starter, an operator or an admin may advance or cancel it;
 another agent gets `403 forbidden`.
 
-## Phone web UI
+## Web UI
 
 The bridge serves a small web app at `/ui/` (and redirects `/` there): the
-same API, for a person in the field with a phone. It is built into the
+same API, for a person in the field on a laptop (or a phone). It is built into the
 `x9-bridge` binary, needs no internet, and loads nothing from anywhere else.
 
 ### Reaching it
 
-The phone has to reach the bridge over the network, so the bridge must listen
+The browser has to reach the bridge over the network, so the bridge must listen
 beyond the machine it runs on. Set `BRIDGE_ADDR` (for the service, in
 `/etc/x9-bridge/env`) to `0.0.0.0:8795` or to one interface's address. Every
 API call still needs a token; the page itself loads without one.
 
-| Field setup | Phone joins | Opens |
+| Field setup | Browser on | Opens |
 | --- | --- | --- |
+| Standard: scanner on its own Wi-Fi, the Pi joined it; the laptop on its own internet with a USB-C cable to the Pi (USB gadget link) | The laptop | `http://10.55.0.1:8795/ui/` |
 | Scanner on USB to the bridge computer; the bridge computer runs its own Wi-Fi hotspot | The hotspot | `http://<hotspot address>:8795/ui/` (NetworkManager's shared hotspot is `10.42.0.1`) |
 | Scanner on its own Wi-Fi; the bridge computer joined it | The scanner's Wi-Fi | `http://<bridge computer's address on that network>:8795/ui/`, or its mDNS name if the network passes mDNS |
 | At the desk | The same LAN as the bridge computer | `http://<its LAN address or mDNS name>:8795/ui/` |
@@ -868,7 +932,7 @@ one.
 
 Paste a token from the token file, or open a link with the token in it:
 `http://<bridge>:8795/ui/?token=<token>` (for example from a QR code). The
-token is kept on the phone (`localStorage`) and removed from the address bar.
+token is kept in the browser (`localStorage`) and removed from the address bar.
 The header shows who you are signed in as; tap it to sign out. The role
 decides what the app offers, exactly as in [Roles](#roles): a `viewer` only
 looks; an `agent`'s scans wait for approval; an `operator` approves, denies,
@@ -882,6 +946,7 @@ stops and deletes.
 | **Runs** | Start a recipe (project and inputs). Each run's steps, what it waits for, and its problem if it failed. A `person` step shows its instructions and a form for its `needs`; a `box` need shows the `preview_of` step's preview to draw on. When the agent has proposed an answer, the step shows it (the box on the preview, the values in the form, the agent's note) with **Looks right**; drawing a new box or editing a value changes it first. Cancel a run. |
 | **Scans** | Pick or create a project; scans grouped by station, area scans under their full dome. A scan: its preview, **measure the opening** (values, checks, evidence image), **aim** (draw a box, see the window in degrees, pick a mode, scan the area), **export** PLY or LAS with its checks and a download, download the raw `.tzf`, delete (operator). |
 | **Log** | The field log, newest first, and a note form. |
+| **Viewer** (`#/view/<scan_id>`, from a scan's **View the points** or the Scans tab's **View the latest scan**) | The scan's points in 3D, coloured by intensity, height or coverage (spacing class, with shadows drawn on the floor in red and a legend). **Plan** shows the coverage plan; **No ceiling** (on for full domes) hides the ceiling to see into the room; **From scanner** puts you where the scanner stood to look around; **Overview** goes back. Drag to turn, right-drag or shift-drag to pan, scroll or pinch to zoom. **Follow new scans** (on by default) opens each new scan in the same project as soon as it is done, and a line at the top says what is scanning meanwhile. |
 
 Things to know:
 
@@ -894,6 +959,9 @@ Things to know:
   proposed box opens in Pan, scrolled into view.
 - It asks before stopping a scan, cancelling a run or deleting a scan.
 - `GET /v1/whoami` tells it the caller's name and role.
+- The viewer draws with WebGL (no libraries). It loads the default view of
+  about 2 M points (28 MB) and the coverage; on the Pi the first view of a
+  scan waits for the bridge to decode it.
 
 ## Events
 
@@ -943,7 +1011,11 @@ $BRIDGE_DATA/
     <scan_id>.jpg            preview, downloaded on first use
     <scan_id>.<ext>.part-dl_…   a download in progress (renamed when complete)
   exports/
-    exp_<id>.ply | .las      export files
+    exp_<id>.ply | .las | .copc.laz   export files
+  views/
+    <scan_id>-<max>.x9v      thinned points for the viewer
+    <scan_id>.coverage.json  coverage summary
+    <scan_id>.coverage.png   coverage plan
   recipes/                   default BRIDGE_RECIPES
     *.toml
 ```
@@ -956,7 +1028,7 @@ $BRIDGE_DATA/
   anything else), the cached file and preview are removed and the request is
   `404 not_found`. If the scanner can't be reached, the request fails with
   `503 scanner_disconnected` rather than serve a file that may be deleted.
-- `DELETE /scans/{id}` removes the scan's cached files and the exports made
+- `DELETE /scans/{id}` removes the scan's cached files, views, coverage and the exports made
   from it since the bridge started. Exports from before a restart are not
   tracked (see below) and are never removed; nor are old exports of scans that
   still exist. Clean the directory by hand when needed.

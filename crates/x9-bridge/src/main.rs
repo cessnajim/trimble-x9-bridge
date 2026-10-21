@@ -26,6 +26,7 @@ mod runs;
 mod state;
 mod ui;
 mod util;
+mod view;
 mod worker;
 
 use anyhow::{bail, Context};

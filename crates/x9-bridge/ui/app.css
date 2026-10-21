@@ -213,3 +213,61 @@ input:focus, select:focus, textarea:focus, .btn:focus-visible, a:focus-visible {
 .measure .big { font-size: 28px; font-weight: 700; letter-spacing: -0.01em; }
 .measure img.evidence { display: block; width: 100%; max-height: 360px; object-fit: contain; image-rendering: pixelated; background: #000; border-radius: 12px; margin: 10px 0 4px; }
 .placeholder.small { height: 160px; }
+
+/* ------------------------------------------------------------ viewer --- */
+body.viewing { overflow: hidden; }
+.viewer {
+  position: fixed; inset: 0; z-index: 50;
+  display: grid; grid-template-rows: auto 1fr auto;
+  background: #0b1020; color: #e2e8f0;
+}
+.viewer[hidden] { display: none; }
+.vw-top, .vw-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 16px; background: #0f172a; border-color: #1e293b; border-style: solid; border-width: 0;
+}
+.vw-top { border-bottom-width: 1px; padding-top: max(10px, env(safe-area-inset-top)); }
+.vw-bar { border-top-width: 1px; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+.vw-top .back { color: #7dd3fc; background: #1e293b; border: 1px solid #334155; }
+.vw-title { display: grid; flex: 1; min-width: 0; }
+.vw-title strong { font-size: 1.05rem; }
+.vw-title .meta, .viewer .meta { color: #94a3b8; font-size: 0.85rem; }
+.vw-follow { display: flex; align-items: center; gap: 6px; font-size: 0.9rem; white-space: nowrap; }
+.vw-follow input { width: 18px; height: 18px; }
+.vw-stage { position: relative; min-height: 0; }
+.vw-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; display: block; }
+.vw-stage canvas:active { cursor: grabbing; }
+.vw-status, .vw-live {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  background: rgba(15, 23, 42, 0.92); border: 1px solid #334155; border-radius: 999px;
+  padding: 8px 16px; font-size: 0.95rem; white-space: nowrap; max-width: calc(100% - 32px); overflow: hidden; text-overflow: ellipsis;
+}
+.vw-status { top: 45%; }
+.vw-live { top: 12px; border-color: #0369a1; }
+.vw-legend, .vw-plan {
+  position: absolute; background: rgba(15, 23, 42, 0.92); border: 1px solid #334155; border-radius: 12px;
+  padding: 10px 12px; font-size: 0.85rem;
+}
+.vw-legend { left: 12px; bottom: 12px; min-width: 220px; }
+.vw-plan { right: 12px; top: 12px; width: min(380px, 55%); }
+.vw-plan img { display: block; width: 100%; height: auto; image-rendering: pixelated; border-radius: 6px; margin: 6px 0; background: #111827; }
+.vw-h { font-weight: 600; margin-bottom: 4px; }
+.vw-key { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.vw-key i { width: 14px; height: 14px; border-radius: 3px; flex: none; }
+.vw-key b { margin-left: auto; font-weight: 600; font-variant-numeric: tabular-nums; }
+.vw-bar button {
+  min-height: 40px; padding: 0 14px; border-radius: 10px; border: 1px solid #334155;
+  background: #1e293b; color: #e2e8f0; font: inherit; font-size: 0.95rem; cursor: pointer;
+}
+.vw-bar button.on { background: #0369a1; border-color: #0ea5e9; color: #fff; }
+.vw-bar .seg { display: flex; }
+.vw-bar .seg button { border-radius: 0; margin-left: -1px; }
+.vw-bar .seg button:first-child { border-radius: 10px 0 0 10px; margin-left: 0; }
+.vw-bar .seg button:last-child { border-radius: 0 10px 10px 0; }
+.vw-size { display: flex; align-items: center; gap: 8px; margin-left: auto; font-size: 0.9rem; }
+@media (max-width: 640px) {
+  .vw-legend { min-width: 0; left: 8px; bottom: 8px; }
+  .vw-plan { right: 8px; top: 56px; }
+  .vw-size { margin-left: 0; }
+  .vw-bar button { padding: 0 10px; }
+}

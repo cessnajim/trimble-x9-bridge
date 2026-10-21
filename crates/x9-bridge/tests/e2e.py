@@ -263,6 +263,52 @@ try:
         t_cancel = time.time() - t_cancel
         check("cancelling an export stops it before it finishes, leaving no file", ej3["state"] == "cancelled"
               and "result" not in ej3 and len(os.listdir(exports_dir)) == n_files and t_cancel < t_full, (ej3, t_cancel, t_full))
+        # COPC, the viewer's points and coverage.
+        s, ej4 = call("POST", f"/scans/{sc2['scan_id']}/exports", "agent", {"format": "copc"})
+        ej4 = wait_job(ej4["job_id"], ("succeeded", "failed"), timeout=180)
+        s, ex4 = call("GET", f"/exports/{ej4['result']['export_id']}", "viewer") if ej4["state"] == "succeeded" else (0, ej4)
+        s2, _, body = fetch(f"/exports/{ex4.get('export_id')}/file", "viewer")
+        check("area COPC export: every point, LAS 1.4 with the COPC record first, compressed",
+              s == 200 and ex4["format"] == "copc" and ex4["point_count"] == 777580 and all(c["ok"] for c in ex4["checks"])
+              and s2 == 200 and body[:4] == b"LASF" and body[24:26] == bytes([1, 4]) and body[377:381] == b"copc"
+              and len(body) < 777580 * 15, (ex4, s2, body[:4], len(body)))
+        import struct
+        # Every octree node reachable from the root, and the nodes hold every point
+        # (copc-rs 0.5 alone leaves empty parents out; readers then lose points).
+        h_off, h_size = struct.unpack_from("<QQ", body, 375 + 54 + 40) if s2 == 200 else (0, 0)
+        nodes = {struct.unpack_from("<iiii", body, i): struct.unpack_from("<i", body, i + 28)[0] for i in range(h_off, h_off + h_size, 32)}
+        orphans = [k for k in nodes if k[0] > 0 and (k[0] - 1, k[1] >> 1, k[2] >> 1, k[3] >> 1) not in nodes]
+        check("COPC hierarchy: no orphan nodes, node counts add up to every point",
+              nodes and not orphans and sum(v for v in nodes.values() if v > 0) == 777580 and h_off + h_size == len(body),
+              (len(nodes), len(orphans), sum(v for v in nodes.values() if v > 0)))
+        t_view = time.time()
+        s, ctype, body = fetch(f"/scans/{station_scan}/view", "viewer")
+        t_view = time.time() - t_view
+        n = struct.unpack_from("<I", body, 4)[0] if s == 200 else 0
+        stride = struct.unpack_from("<I", body, 8)[0] if s == 200 else 0
+        check("dome view: X9V1, about 2 M points, every 2nd row and column", s == 200 and body[:4] == b"X9V1"
+              and 1_200_000 < n <= 2_100_000 and stride == 2 and len(body) == 16 + 14 * n
+              and max(body[16 + 13 * n:]) <= 3, (s, ctype, n, stride, len(body)))
+        t0 = time.time()
+        s, _, again = fetch(f"/scans/{station_scan}/view", "viewer")
+        check("a second view request is served from the cache", s == 200 and again == body and time.time() - t0 < t_view / 2 + 0.2, (t_view, time.time() - t0))
+        s, _, small = fetch(f"/scans/{station_scan}/view?max_points=100000", "viewer")
+        n2 = struct.unpack_from("<I", small, 4)[0] if s == 200 else 0
+        check("max_points thins harder", s == 200 and 50_000 < n2 <= 105_000, (s, n2))
+        s, cov = call("GET", f"/scans/{station_scan}/coverage", "viewer")
+        shares = sum(c["share"] for c in cov["classes"]) if s == 200 else 0
+        check("dome coverage: spacing classes add up, plan has seen floor and shadows, image linked",
+              s == 200 and abs(shares - 1) < 0.01 and cov["point_count"] == 6281859 and cov["plan"]["seen_m2"] > 10
+              and cov["plan"]["shadow_m2"] > 0 and cov["spacing_mm"]["p50"] > 0
+              and cov["image_url"] == f"/v1/scans/{station_scan}/coverage/image", cov)
+        s, ctype, png = fetch(f"/scans/{station_scan}/coverage/image", "viewer")
+        check("coverage image is a PNG the plan's size", s == 200 and ctype == "image/png" and png[1:4] == b"PNG"
+              and struct.unpack(">II", png[16:24]) == (cov["plan"]["width"], cov["plan"]["height"]), (s, ctype))
+        print(f"      (dome view built in {t_view:.1f} s; spacing p50 {cov['spacing_mm']['p50']} mm; shadow {cov['plan']['shadow_m2']} m²)")
+        s, _ = call("GET", f"/scans/{sc2['scan_id']}/coverage", "viewer")
+        check("area coverage builds too", s == 200, s)
+        s, b = call("GET", f"/scans/{uuid.uuid4()}/view", "viewer")
+        check("view of a scan the scanner doesn't list is 404", s == 404, (s, b))
     # --- recipes and runs ---
     s, rl = call("GET", "/recipes", "viewer")
     check("recipes listed, the broken one skipped", s == 200 and sorted(r["recipe_id"] for r in rl) == ["log-note", "window-measurement"], rl)
@@ -423,6 +469,9 @@ try:
         s, _ = call("GET", f"/exports/{ex.get('export_id')}", "viewer")
         s2, _, _ = fetch(f"/exports/{ex.get('export_id')}/file", "viewer")
         check("delete also removes exports made from the scan", s == 404 and s2 == 404, (s, s2))
+        views = os.listdir(os.path.join(tmp, "data", "views"))
+        check("delete also removes the scan's view and coverage files", not any(v.startswith(sc2["scan_id"]) for v in views)
+              and any(v.startswith(station_scan) for v in views), views)
     else:
         s, b = call("GET", f"/scans/{station_scan}/tzf", "viewer")
         check("a scanner error status (no file on the mock) is 502 scanner_error", s == 502 and b["code"] == "scanner_error"

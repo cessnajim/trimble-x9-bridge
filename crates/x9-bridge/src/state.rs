@@ -103,6 +103,8 @@ pub struct AppState {
     pub data_dir: std::path::PathBuf,
     /// Recipe files (`*.toml`), read on each request so new ones need no restart.
     pub recipes_dir: std::path::PathBuf,
+    /// Viewer and coverage builds run one at a time (each decodes a whole scan).
+    pub view_lock: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
@@ -119,6 +121,7 @@ impl AppState {
             poll,
             data_dir,
             recipes_dir,
+            view_lock: tokio::sync::Mutex::new(()),
         }
     }
 

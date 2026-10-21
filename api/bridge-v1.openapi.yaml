@@ -267,6 +267,67 @@ paths:
               schema: { type: string, format: binary }
         default: { $ref: "#/components/responses/Problem" }
 
+  /scans/{scan_id}/view:
+    parameters: [{ $ref: "#/components/parameters/ScanId" }]
+    get:
+      tags: [scans]
+      operationId: getScanView
+      summary: Thinned points for a viewer (X9V1 binary).
+      description: |
+        Every kth row and column of the scan grid, so that about `max_points`
+        remain. Built from the scan file on first use and cached. Body,
+        little-endian: `X9V1`; u32 n; u32 stride k; f32 angular step (rad);
+        n × [x, y, z] f32 (metres, levelled); n u8 grey; n u8 spacing class
+        (0 fine ≤ 6 mm, 1 good ≤ 12, 2 coarse ≤ 25, 3 sparse).
+      parameters:
+        - name: max_points
+          in: query
+          schema: { type: integer, minimum: 10000, maximum: 8000000, default: 2000000 }
+      responses:
+        "200":
+          description: X9V1 points.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /scans/{scan_id}/coverage:
+    parameters: [{ $ref: "#/components/parameters/ScanId" }]
+    get:
+      tags: [scans]
+      operationId: getScanCoverage
+      summary: What the scan covered, for a person or an agent.
+      description: |
+        Point spacing at full resolution (range × angular step) and a plan
+        from above in 10 cm cells within 25 m: seen cells, and shadows (no
+        points at any height though nearer than the farthest return in that
+        direction, and over 1 m from the scanner).
+      responses:
+        "200":
+          description: Coverage.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Coverage" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /scans/{scan_id}/coverage/image:
+    parameters: [{ $ref: "#/components/parameters/ScanId" }]
+    get:
+      tags: [scans]
+      operationId: getScanCoverageImage
+      summary: The coverage plan as a picture.
+      description: |
+        x right, y up, one pixel per 10 cm cell: greens to orange by spacing
+        class, red shadow, dark nothing, a white cross at the scanner. Coverage
+        only, never intensity.
+      responses:
+        "200":
+          description: PNG.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        default: { $ref: "#/components/responses/Problem" }
+
   /aim:
     post:
       tags: [aiming]
@@ -1122,7 +1183,12 @@ components:
       type: object
       required: [format]
       properties:
-        format: { type: string, enum: [ply, las] }
+        format:
+          type: string
+          enum: [ply, las, copc]
+          description: >-
+            `copc`: Cloud Optimized Point Cloud (LAS 1.4, point format 6,
+            LAZ octree, local CRS), file `exp_….copc.laz`.
         intensity:
           type: string
           enum: [auto, scan, preview, none]
@@ -1133,13 +1199,56 @@ components:
             `preview` fails the export (`decode_failed`) without a preview.
             `none` writes mid-grey. Points are always levelled.
 
+    Coverage:
+      type: object
+      required: [scan_id, point_count, angle_step_rad, spacing_mm, classes, plan, view, image_url]
+      properties:
+        scan_id: { type: string }
+        point_count: { type: integer }
+        angle_step_rad: { type: number }
+        spacing_mm:
+          type: object
+          properties:
+            p10: { type: number }
+            p50: { type: number }
+            p90: { type: number }
+        classes:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string, enum: [fine, good, coarse, sparse] }
+              max_mm: { type: [number, "null"] }
+              share: { type: number }
+        plan:
+          type: object
+          properties:
+            cell_m: { type: number }
+            radius_m: { type: number }
+            origin_m: { type: array, items: { type: number }, minItems: 2, maxItems: 2 }
+            width: { type: integer }
+            height: { type: integer }
+            seen_m2: { type: number }
+            shadows_assessed:
+              type: boolean
+              description: Only scans with returns in ≥ 90 % of directions (full domes).
+            shadow_m2: { type: [number, "null"] }
+            shadow_share: { type: [number, "null"] }
+            beyond_radius_share: { type: number }
+        view:
+          type: object
+          properties:
+            points: { type: integer }
+            stride: { type: integer }
+        image_url: { type: string }
+
     Export:
       type: object
       required: [export_id, scan_id, format, point_count, checks]
       properties:
         export_id: { type: string }
         scan_id: { type: string }
-        format: { type: string, enum: [ply, las] }
+        format: { type: string, enum: [ply, las, copc] }
         point_count: { type: integer }
         bytes: { type: integer }
         bounds_m:

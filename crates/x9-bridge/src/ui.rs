@@ -1,4 +1,4 @@
-//! The phone web UI: static files built into the binary, served at `/ui/`.
+//! The web UI: static files built into the binary, served at `/ui/`.
 //! They need no token to load; every API call they make sends one.
 
 use axum::{
@@ -8,9 +8,10 @@ use axum::{
 };
 
 const INDEX: &str = include_str!("../ui/index.html");
-const FILES: [(&str, &str, &str); 3] = [
+const FILES: [(&str, &str, &str); 4] = [
     ("app.js", "text/javascript; charset=utf-8", include_str!("../ui/app.js")),
     ("app.css", "text/css; charset=utf-8", include_str!("../ui/app.css")),
+    ("viewer.js", "text/javascript; charset=utf-8", include_str!("../ui/viewer.js")),
     ("icon.svg", "image/svg+xml", include_str!("../ui/icon.svg")),
 ];
 
