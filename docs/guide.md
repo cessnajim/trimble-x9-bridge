@@ -55,7 +55,7 @@ a `.sha256` file. It contains:
 | `x9-mock` | The scanner simulator ([tools.md](tools.md#x9-mock)) |
 | `x9` | A small CLI over the scanner API ([tools.md](tools.md#the-x9-cli)) |
 | `ops/` | `x9-bridge.service`, `x9-bridge-run`, `90-x9-bridge`, `x9-netctl`, `README.md` |
-| `README.md`, `PROVENANCE.md`, `LICENSE` | |
+| `README.md`, `PROVENANCE.md`, `LICENSE`, `NOTICE` | |
 
 ```bash
 tag=v0.1.2; target=aarch64-unknown-linux-gnu

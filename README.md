@@ -113,5 +113,10 @@ tools, with previews returned as images and recipes as a prompt.
 
 ## Status
 
-Version 0.1: the API is a draft. Tested against the simulator and on a real X9
+Version 0.9.0: the API is a draft. Tested against the simulator and on a real X9
 (status, an approved full dome, two granted area scans).
+
+## License
+
+[MIT](LICENSE). Copyright (c) 2026 North Idaho Labs.
+"Trimble" and "X9" are trademarks of Trimble Inc.; the non-affiliation note is in [NOTICE](NOTICE).
