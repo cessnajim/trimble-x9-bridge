@@ -1472,6 +1472,16 @@ components:
               placed: { type: boolean }
               turn_deg: { type: number, nullable: true }
               xyz_m: { type: array, items: { type: number }, nullable: true }
+              verdict: { type: string, enum: [confirmed, single, frame, doubtful, ambiguous, unplaced] }
+              counts_for_coverage: { type: boolean }
+              tied_to: { type: array, items: { type: integer } }
+              checks:
+                type: object
+                properties:
+                  surface_mm: { type: array, items: { type: number }, nullable: true, description: "Median and p90 distance to neighbours' same-facing surfaces." }
+                  free_space: { type: number, nullable: true, description: Worst share of wall points where a neighbour saw through. }
+                  ground_mm: { type: number, nullable: true }
+              reasons: { type: array, items: { type: string } }
         pairs:
           type: array
           description: Pairs that fit (each a constraint), with what the global fit left them.
@@ -1484,6 +1494,16 @@ components:
               left_mm: { type: number }
               outlier: { type: boolean }
         pairs_tried: { type: integer }
+        rejected_pairs:
+          type: array
+          description: Pairs that fit but were not used, weakly held or ambiguous, with why.
+          items:
+            type: object
+            properties:
+              stations: { type: array, items: { type: integer } }
+              rms_mm: { type: number }
+              matches: { type: integer }
+              why: { type: string }
         walls:
           type: array
           items:

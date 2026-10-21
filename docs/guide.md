@@ -903,6 +903,32 @@ curl -s -X POST -H "$H" $B/projects/$PROJECT/registration     # register again (
 | Walls | Straight runs in the merged plan (points spanning at least 0.5 m of height), longest first: `wall_id`, `from`, `to`, `length_m`, `z_m`, `seen_by` (station numbers). Ids are renumbered on each registration |
 | Faces | `POST …/face` with a `wall_id` or `from`/`to`: `seen_share` of its length (0.5 m columns with at least 1 m of wall in points; windows leave the wall around them), `spacing_mm`, the stations that saw it and the `unseen` stretches. `covered` at 80% |
 
+#### How registration checks itself
+
+A fit can look perfect and be wrong: along a lone wall it can slide, and in a
+symmetric building it can land in the mirror-image place. So every pair and
+every station goes through checks that need no person:
+
+| Layer | What it catches | Rule |
+| --- | --- | --- |
+| Inputs | Unlevelled or short scans | The decoder's checks |
+| Pair fit | A poor fit | RMS 15 mm or less over at least 8000 matched flat points |
+| Held firmly | A fit that can slide (a lone wall, a fence, a corridor) or turn | The weakest direction of the fit's information must carry at least 1% of the matches (a turn counted at a 10 m arm); otherwise the pair is "weakly held" and the reason names the direction |
+| Unique | Symmetric or repeated walls | Every coarse guess is refined; a different fit with 80% of the best one's matches is a rival. Free space decides between rivals (one that puts 3% or more of its points where the other station saw straight through, three times the other's, loses); if it can't, the pair is "ambiguous" and is not used |
+| Loops | A wrong pair among right ones | The robust global fit; a pair it leaves more than 10 cm or 0.3° from its own fit is an outlier |
+| Independent | A placement the pairs agree on but the data doesn’t | Against every neighbour it overlaps, under the final poses, it disagrees when a fresh fit moves it more than 20 mm or 0.08°, when more than 5% of its wall points lie where the other saw straight through, when same-facing surfaces sit more than 20 mm apart (median), or when the ground under its tripod is more than 10 cm off. Each check votes among the neighbours it has evidence for |
+| Verdict | | `confirmed`: tied by two or more pairs that count, no check against it; `single`: one tie; `frame`: the only station; `doubtful`: a check finds it off against more than half its neighbours; `ambiguous`: only rival fits; `unplaced` |
+
+Only `confirmed`, `single` and `frame` stations count towards wall coverage;
+the plan draws the others amber with a question mark, and the field log says
+why and what to do. On the recorded 12-station survey every station is
+confirmed (fresh fits within 9 mm and 0.015°, free space under 2%). Planted
+errors of 2 cm and up, and 0.1° and up, make exactly the moved station
+doubtful, and the stations around it stay confirmed. `tools/register/bench.sh` in the hub repeats this
+on a recorded survey. Unit tests cover a corridor (weakly held), a symmetric
+room (ambiguous), the same room with a partition (the right fit, by free
+space), and a misplaced station among three.
+
 Registration runs one at a time per project; a station that lands while one
 runs makes it run once more. Each result is announced as a `registration`
 event and saved to `registrations.json`, so a restart keeps it. On the

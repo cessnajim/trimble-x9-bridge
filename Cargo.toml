@@ -13,3 +13,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs"] }
 anyhow = "1"
 thiserror = "2"
+
+# Registration tests run FFT searches and ICP: optimise them.
+[profile.test]
+opt-level = 3

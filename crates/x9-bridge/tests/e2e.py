@@ -5,7 +5,7 @@ usage: e2e.py <target/release dir>
 Starts the mock and the bridge on spare ports, walks the main flows, and
 prints PASS/FAIL per check. Exit code 1 if anything failed.
 """
-import json, os, re, subprocess, sys, tempfile, threading, time, uuid, urllib.request, urllib.error
+import json, os, re, shutil, subprocess, sys, tempfile, threading, time, uuid, urllib.request, urllib.error
 
 BIN = sys.argv[1]
 MOCK, BRIDGE = "127.0.0.1:34599", "127.0.0.1:8799"
@@ -118,6 +118,13 @@ try:
         except Exception:
             pass
     threading.Thread(target=listen, daemon=True).start()
+
+    def saw(kind, timeout=3.0):
+        # Events arrive a moment after the call that caused them returns.
+        deadline = time.time() + timeout
+        while kind not in events and time.time() < deadline:
+            time.sleep(0.05)
+        return kind in events
 
     s, b = call("GET", "/health")
     check("health needs no token", s == 200 and b["ok"])
@@ -340,7 +347,7 @@ try:
         check("an agent proposes the next station; the bridge draws it, keeps it and lists it",
               s == 200 and ns["proposed_by"] == "agent-1" and ns["preview_size"] == [2082, 815] and ns["marker"]["x"] == 900
               and s2 == 200 and ctype == "image/png" and png[1:4] == b"PNG" and lst and lst[0]["scan_id"] == station_scan
-              and "next_station" in events, (s, ns, s2, ctype))
+              and saw("next_station"), (s, ns, s2, ctype))
         s, _ = call("PUT", f"/scans/{sc2['scan_id']}/next-station", "agent", {**prop, "marker": {"x": 100, "y": 100}})
         check("a proposal on the area scan too", s == 200, s)
     # Registration: each full dome lands in the project frame by itself.
@@ -357,7 +364,10 @@ try:
     check("viewer can't start a registration (403)", s == 403, b)
     if FIX:
         check("every full dome is placed in one frame, with walls", len(reg["stations"]) == len(domes) >= 1
-              and all(x["placed"] for x in reg["stations"]) and reg["walls"] and "registration" in events, reg["summary"])
+              and all(x["placed"] for x in reg["stations"]) and reg["walls"] and saw("registration"), reg["summary"])
+        check("each station has a verdict, and the placed ones count for coverage",
+              all(x["verdict"] in ("frame", "confirmed", "single") and x["counts_for_coverage"] for x in reg["stations"]),
+              [(x["station"], x["verdict"], x["reasons"]) for x in reg["stations"]])
         s, ctype, png = fetch(f"/projects/{pid}/registration/plan", "viewer")
         check("the registered plan is drawn", s == 200 and ctype == "image/png" and png[1:4] == b"PNG", (s, ctype))
         s, fc = call("POST", f"/projects/{pid}/registration/face", "viewer", {"wall_id": reg["walls"][0]["wall_id"]})
@@ -372,7 +382,7 @@ try:
                  "done_when": "Every facade seen, no shadow on the house walls",
                  "targets": [{"target_id": "north", "name": "North facade", "kind": "facade"}]})
     check("an agent sets the mission with its first target", s == 200 and ms["state"] == "active" and ms["targets"][0]["status"] == "open"
-          and "mission" in events, ms)
+          and saw("mission"), ms)
     if FIX:
         w = reg["walls"][0]
         s, ms = call("POST", f"/projects/{pid}/mission/targets", "agent", {"targets": [
@@ -676,6 +686,10 @@ try:
 finally:
     for p in procs:
         p.terminate()
+    for p in procs:
+        p.wait()
+    # Each run's data directory holds scans and exports (half a gigabyte with fixtures).
+    shutil.rmtree(tmp, ignore_errors=True)
 
 print(f"\n{sum(results)}/{len(results)} checks passed")
 sys.exit(0 if all(results) else 1)

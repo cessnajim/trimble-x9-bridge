@@ -337,7 +337,7 @@ fn cancel_requested_locked(inner: &crate::state::Inner, job_id: &str) -> bool {
 /// wall faces. `Err(None)`: cancelled.
 async fn register_once(st: &Arc<AppState>, job_id: &str, project_id: &str) -> Result<serde_json::Value, Option<ApiError>> {
     use crate::files::{scan_file, FileKind};
-    use crate::register::{prepare, register_all, walls, Cloud, Merged, Prepared, Registration, StationPose};
+    use crate::register::{audit, prepare, register_all, walls, Cloud, Merged, Prepared, Registration, StationPose};
     let mut stations: Vec<(u16, String)> = crate::routes::all_scans(st)
         .await
         .map_err(Some)?
@@ -412,6 +412,9 @@ async fn register_once(st: &Arc<AppState>, job_id: &str, project_id: &str) -> Re
             update(&st2, &job2, |r| r.job.phase = Some(format!("matching station {} against {}", numbers2[b], numbers2[a])));
         };
         let (pairs, poses) = register_all(&ids2, &refs, pairs0, &say);
+        update(&st2, &job2, |r| r.job.phase = Some("checking".into()));
+        let names: Vec<String> = numbers2.iter().map(u16::to_string).collect();
+        let audits = audit(&ids2, &names, &refs, &poses, &pairs);
         let mut merged = Merged::default();
         for (k, p) in poses.iter().enumerate() {
             if let Some(p) = p {
@@ -419,10 +422,10 @@ async fn register_once(st: &Arc<AppState>, job_id: &str, project_id: &str) -> Re
             }
         }
         let ws = walls(&merged);
-        Ok((pairs, poses, merged, ws))
+        Ok((pairs, poses, audits, merged, ws))
     })
     .await;
-    let (pairs, poses, merged, ws) = match out {
+    let (pairs, poses, audits, merged, ws) = match out {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => return Err(Some(ApiError::cache(e))),
         Err(e) => return Err(Some(ApiError::conflict(e.to_string()))),
@@ -433,7 +436,7 @@ async fn register_once(st: &Arc<AppState>, job_id: &str, project_id: &str) -> Re
     let mut reg = Registration {
         project_id: project_id.to_string(),
         frame_scan_id: ids.first().cloned(),
-        stations: stations.iter().zip(&poses).map(|((n, id), p)| StationPose { scan_id: id.clone(), station: *n, pose: *p }).collect(),
+        stations: stations.iter().zip(&poses).zip(audits).map(|(((n, id), p), a)| StationPose { scan_id: id.clone(), station: *n, pose: *p, audit: Some(a) }).collect(),
         pairs,
         walls: ws,
         summary: String::new(),
@@ -456,31 +459,42 @@ async fn register_once(st: &Arc<AppState>, job_id: &str, project_id: &str) -> Re
     st.save_registrations();
     st.emit("registration", reg.to_json());
 
-    // What changed, for the log: newly placed stations, and any that won't place.
-    let was_placed = |id: &str| prev.as_ref().is_some_and(|p| p.stations.iter().any(|s| s.scan_id == id && s.pose.is_some()));
+    // What changed, for the log: each station whose verdict is new.
+    let before = |id: &str| {
+        prev.as_ref().and_then(|p| p.stations.iter().find(|s| s.scan_id == id)).map(|s| s.audit.as_ref().map(|a| a.verdict.clone()).unwrap_or_default())
+    };
     for (s, id) in reg.stations.iter().zip(&ids) {
-        if was_placed(id) {
+        let a = s.audit.clone().unwrap_or_default();
+        if before(id).as_deref() == Some(a.verdict.as_str()) {
             continue;
         }
-        let fits: Vec<String> = reg
-            .pairs
+        let tied: Vec<String> = a
+            .ties
             .iter()
-            .filter(|p| p.good && !p.outlier && (p.a == *id || p.b == *id))
-            .filter_map(|p| {
-                let other = if p.a == *id { &p.b } else { &p.a };
-                let n = reg.stations.iter().find(|x| &x.scan_id == other)?.station;
+            .filter_map(|t| {
+                let n = reg.stations.iter().find(|x| &x.scan_id == t)?.station;
+                let p = reg.pairs.iter().find(|p| p.good && ((p.a == *id && p.b == *t) || (p.b == *id && p.a == *t)))?;
                 Some(format!("{n} ({} mm)", p.rms_mm.unwrap_or(0.0)))
             })
             .collect();
-        let text = match (&s.pose, reg.stations.first().map(|f| f.scan_id == *id).unwrap_or(false)) {
-            (Some(_), true) => format!("Station {} is the project frame", s.station),
-            (Some(_), false) => format!("Station {} registered: fits station{} {}", s.station, if fits.len() == 1 { "" } else { "s" }, fits.join(", ")),
-            (None, _) => format!(
-                "Station {} did not register: it shares too little wall with the placed stations. Set up the next station where it sees walls an earlier station saw",
+        let why = a.reasons.join("; ");
+        let text = match a.verdict.as_str() {
+            "frame" => format!("Station {} is the project frame", s.station),
+            "confirmed" => format!("Station {} registered and confirmed: tied to stations {}, and the independent checks agree", s.station, tied.join(", ")),
+            "single" => format!(
+                "Station {} registered on one tie (station {}); the independent checks agree. A station that also sees what it saw would confirm it",
+                s.station,
+                tied.join(", ")
+            ),
+            "doubtful" => format!("Station {} is doubtful: {why}. It does not count towards coverage until a later station settles it", s.station),
+            "ambiguous" => format!(
+                "Station {} is not placed: {why}. Set up the next station where it sees something that breaks the symmetry (a corner, a door, a tree) along with walls an earlier station saw",
                 s.station
             ),
+            _ => format!("Station {} did not register: {why}. Set up the next station where it sees walls an earlier station saw", s.station),
         };
-        st.log(if s.pose.is_some() { "note" } else { "check" }, text, "bridge", Some(project_id), &[("scan_id", id)]);
+        let kind = if s.pose.is_some() && a.trusted() { "note" } else { "check" };
+        st.log(kind, text, "bridge", Some(project_id), &[("scan_id", id)]);
     }
     for (n, why) in &skipped {
         st.log("check", format!("Station {n} could not be registered: {why}"), "bridge", Some(project_id), &[]);

@@ -700,7 +700,8 @@ async fn get_registration_plan(State(st): St, h: HeaderMap, Path(project_id): Pa
         })
         .unwrap_or_default();
     let png = tokio::task::spawn_blocking(move || {
-        let stations: Vec<(u16, crate::register::Pose)> = reg.stations.iter().filter_map(|s| Some((s.station, s.pose?))).collect();
+        let stations: Vec<(u16, crate::register::Pose, bool)> =
+            reg.stations.iter().filter_map(|s| Some((s.station, s.pose?, s.audit.as_ref().is_none_or(crate::register::Audit::trusted)))).collect();
         crate::register::plan_png(&merged, &crate::register::PlanMarks { stations: &stations, walls: &reg.walls, faces })
     })
     .await

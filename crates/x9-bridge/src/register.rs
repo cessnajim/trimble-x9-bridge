@@ -41,6 +41,34 @@ pub const GOOD_MATCHES: usize = 8000;
 /// A pair the global fit leaves further off than this is an outlier.
 const OUTLIER_M: f64 = 0.10;
 const OUTLIER_DEG: f64 = 0.3;
+/// A pair is held firmly when its weakest direction carries at least this
+/// share of the matches (a turn counted at a 10 m arm). Below it the fit can
+/// slide (along a lone wall, a fence, a corridor) and still look perfect.
+pub const CONSTRAINT_MIN: f64 = 0.01;
+const TURN_ARM: f64 = 10.0;
+/// Two fits differ when this far apart; a different fit is a rival when it
+/// also fits and has this share of the best one's matches.
+const DISTINCT_M: f64 = 0.3;
+const DISTINCT_DEG: f64 = 2.0;
+const RIVAL_SHARE: f64 = 0.8;
+/// Independent checks between placed stations (`audit`): the share of one
+/// station's flat points lying where the other saw straight through, how far
+/// its surfaces sit off the other's, and the ground under its tripod.
+const FREE_SPACE_BAD: f64 = 0.05;
+/// Rival fits: one loses when it puts at least this share in free space and
+/// three times as much as the other (correct stations on a recorded
+/// survey stay under 0.02).
+const FREE_SPACE_RIVAL: f64 = 0.03;
+const SURFACE_BAD_MM: f64 = 20.0;
+/// A re-fit against a neighbour, from the final poses, may move a station
+/// this much before it disagrees (pairs that count are left within 10 mm).
+const REFIT_BAD_MM: f64 = 20.0;
+const REFIT_BAD_DEG: f64 = 0.08;
+/// Coarse: on grass a far station reads the ground a few centimetres high.
+const GROUND_BAD_M: f64 = 0.10;
+/// Direction bins of a station's depth map (0.5°).
+const NAZ: usize = 720;
+const NEL: usize = 360;
 
 // ------------------------------------------------------------------ clouds ---
 
@@ -243,6 +271,52 @@ fn smallest_eigen(mut a: [[f64; 3]; 3]) -> ([f64; 3], f64) {
     ([v[0][i], v[1][i], v[2][i]], ev[i].max(0.0) / (sum + 1e-12))
 }
 
+/// Eigenvalues and eigenvectors (column `k` of the row-major `n × n` result)
+/// of a symmetric matrix, by cyclic Jacobi.
+#[allow(clippy::needless_range_loop)]
+fn sym_eigen(mut a: Vec<f64>, n: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut v = vec![0.0; n * n];
+    for i in 0..n {
+        v[i * n + i] = 1.0;
+    }
+    let scale = 1.0 + (0..n * n).map(|i| a[i].abs()).sum::<f64>();
+    for _ in 0..60 {
+        let off: f64 = (0..n).flat_map(|p| (p + 1..n).map(move |q| (p, q))).map(|(p, q)| a[p * n + q].abs()).sum();
+        if off < 1e-14 * scale {
+            break;
+        }
+        for p in 0..n {
+            for q in p + 1..n {
+                let apq = a[p * n + q];
+                if apq.abs() < 1e-300 {
+                    continue;
+                }
+                let theta = (a[q * n + q] - a[p * n + p]) / (2.0 * apq);
+                let sgn = if theta >= 0.0 { 1.0 } else { -1.0 };
+                let t = sgn / (theta.abs() + (theta * theta + 1.0).sqrt());
+                let c = 1.0 / (t * t + 1.0).sqrt();
+                let s = t * c;
+                for k in 0..n {
+                    let (akp, akq) = (a[k * n + p], a[k * n + q]);
+                    a[k * n + p] = c * akp - s * akq;
+                    a[k * n + q] = s * akp + c * akq;
+                }
+                for k in 0..n {
+                    let (apk, aqk) = (a[p * n + k], a[q * n + k]);
+                    a[p * n + k] = c * apk - s * aqk;
+                    a[q * n + k] = s * apk + c * aqk;
+                }
+                for k in 0..n {
+                    let (vkp, vkq) = (v[k * n + p], v[k * n + q]);
+                    v[k * n + p] = c * vkp - s * vkq;
+                    v[k * n + q] = s * vkp + c * vkq;
+                }
+            }
+        }
+    }
+    ((0..n).map(|i| a[i * n + i]).collect(), v)
+}
+
 /// Run `f` over `0..n` on all cores, collecting results in order.
 fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     let threads = std::thread::available_parallelism().map(|t| t.get()).unwrap_or(1).min(n.max(1));
@@ -266,6 +340,17 @@ pub struct Prepared {
     pub wall: Vec<bool>,
     tree: Tree,
     slice: Vec<[f32; 2]>,
+    /// Nearest return per direction (`NAZ × NEL` bins, 0: none): the space
+    /// before it is what the scanner saw through.
+    depth: Vec<f32>,
+}
+
+/// A direction's bin in a depth map: (azimuth, elevation).
+fn depth_bin(p: [f32; 3]) -> (usize, usize) {
+    use std::f32::consts::{FRAC_PI_2, PI, TAU};
+    let az = p[1].atan2(p[0]).rem_euclid(TAU);
+    let el = p[2].atan2(p[0].hypot(p[1])) + FRAC_PI_2;
+    (((az / TAU * NAZ as f32) as usize).min(NAZ - 1), ((el / PI * NEL as f32) as usize).min(NEL - 1))
 }
 
 pub fn prepare(c: &Cloud) -> Prepared {
@@ -310,7 +395,15 @@ pub fn prepare(c: &Cloud) -> Prepared {
         .filter(|(p, w)| **w && p[2] > SLICE.0 && p[2] < SLICE.1)
         .map(|(p, _)| [p[0], p[1]])
         .collect();
-    Prepared { pts, range, normal, planar, wall, tree, slice }
+    // From the 5 cm cloud: denser in angle than the matching points.
+    let mut depth = vec![0f32; NAZ * NEL];
+    for p in &c.pts {
+        let (i, j) = depth_bin(*p);
+        let d = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+        let e = &mut depth[j * NAZ + i];
+        *e = if *e == 0.0 { d } else { e.min(d) };
+    }
+    Prepared { pts, range, normal, planar, wall, tree, slice, depth }
 }
 
 /// How B sits in A: `B_in_A = R(turn) b + shift`.
@@ -325,8 +418,24 @@ pub struct Pair {
     pub matches: usize,
     pub overlap: f64,
     pub coarse_score: f64,
-    /// Fits well enough to be a constraint.
+    /// Fits well enough, held firmly and unique: a constraint.
     pub good: bool,
+    /// The share of the matches holding the fit's weakest direction (0: free
+    /// to slide; under 0.01 is too weak).
+    #[serde(default)]
+    pub constraint: f64,
+    /// That direction in words, when it is too weak.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weak: Option<String>,
+    /// A different fit is as good (symmetric or repeated walls).
+    #[serde(default)]
+    pub ambiguous: bool,
+    /// How rival fits were told apart ("free space").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<String>,
+    /// Why it is not a constraint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejected: Option<String>,
     /// After the global fit: how far this pair is left from its own fit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub left_mm: Option<f64>,
@@ -507,8 +616,16 @@ fn solve_dense(mut a: Vec<f64>, mut b: Vec<f64>, n: usize) -> Option<Vec<f64>> {
 }
 
 /// Point-to-plane ICP, 4 DOF, from a guess: (turn, shift, rms m, overlap, matches).
-/// An ICP result: turn (rad), shift (m), RMS (m), overlap, matches.
-type Fit = (f64, [f64; 3], f64, f64, usize);
+/// An ICP result: B in A (turn rad, x, y, z), RMS (m), overlap, matches, and
+/// the information the matches carry (4 × 4, a turn at a 10 m arm).
+#[derive(Clone, Copy)]
+struct Fit {
+    x: P4,
+    rms: f64,
+    overlap: f64,
+    matches: usize,
+    info: [f64; 16],
+}
 
 fn icp(a: &Prepared, b: &Prepared, theta: f64, t: [f64; 3]) -> Option<Fit> {
     let mut x = [theta, t[0], t[1], t[2]];
@@ -557,8 +674,9 @@ fn icp(a: &Prepared, b: &Prepared, theta: f64, t: [f64; 3]) -> Option<Fit> {
             }
         }
     }
-    // Final fit over all of B's points.
+    // Final fit over all of B's points, and what holds it.
     let (mut ss, mut matches) = (0f64, 0usize);
+    let mut info = [0f64; 16];
     for &p in &b.pts {
         let q = moved(&x, p);
         let Some((j, _)) = a.tree.nearest([q[0] as f32, q[1] as f32, q[2] as f32], 0.05) else { continue };
@@ -566,11 +684,146 @@ fn icp(a: &Prepared, b: &Prepared, theta: f64, t: [f64; 3]) -> Option<Fit> {
             continue;
         }
         let (aq, n) = (a.pts[j], a.normal[j]);
-        let r = (q[0] - aq[0] as f64) * n[0] as f64 + (q[1] - aq[1] as f64) * n[1] as f64 + (q[2] - aq[2] as f64) * n[2] as f64;
+        let nn = [n[0] as f64, n[1] as f64, n[2] as f64];
+        let r = (q[0] - aq[0] as f64) * nn[0] + (q[1] - aq[1] as f64) * nn[1] + (q[2] - aq[2] as f64) * nn[2];
         ss += r * r;
         matches += 1;
+        let (rx, ry) = (q[0] - x[1], q[1] - x[2]);
+        let jrow = [(nn[0] * -ry + nn[1] * rx) / TURN_ARM, nn[0], nn[1], nn[2]];
+        for i in 0..4 {
+            for k in 0..4 {
+                info[i * 4 + k] += jrow[i] * jrow[k];
+            }
+        }
     }
-    (matches > 0).then(|| (x[0], [x[1], x[2], x[3]], (ss / matches as f64).sqrt(), matches as f64 / b.pts.len().max(1) as f64, matches))
+    (matches > 0).then(|| Fit { x, rms: (ss / matches as f64).sqrt(), overlap: matches as f64 / b.pts.len().max(1) as f64, matches, info })
+}
+
+/// The fit's weakest direction: its share of the matches, and in words.
+fn weakest(f: &Fit) -> (f64, String) {
+    let (vals, vecs) = sym_eigen(f.info.to_vec(), 4);
+    let k = (0..4).min_by(|&a, &b| vals[a].total_cmp(&vals[b])).unwrap_or(0);
+    let v: Vec<f64> = (0..4).map(|i| vecs[i * 4 + k]).collect();
+    let share = vals[k].max(0.0) / f.matches.max(1) as f64;
+    let words = if v[0].abs() >= 0.7 {
+        "it can turn about vertical".to_string()
+    } else if v[3].abs() >= 0.7 {
+        "it can slide up and down".to_string()
+    } else {
+        let h = v[1].hypot(v[2]).max(1e-9);
+        format!("it can slide along ({:.2}, {:.2}) in the first station's frame", v[1] / h, v[2] / h)
+    };
+    (share, words)
+}
+
+/// Share of B's wall points that land, by `rel` (B in A), where A saw
+/// straight through: nearer than A's nearest return within 1° of that
+/// direction (at least three directions with returns), by 0.3 m or 5%. Walls only: ground seen at a grazing angle
+/// turns a few centimetres of grass into tens of centimetres of range. None
+/// when too few can be judged.
+fn free_space(a: &Prepared, b: &Prepared, rel: P4) -> Option<f64> {
+    let (s, c) = rel[0].sin_cos();
+    let idx: Vec<usize> = (0..b.pts.len()).filter(|&i| b.wall[i]).collect();
+    let every = (idx.len() / 20_000).max(1);
+    let (mut tested, mut through) = (0usize, 0usize);
+    for &i in idx.iter().step_by(every) {
+        let p = b.pts[i];
+        let (px, py) = (p[0] as f64, p[1] as f64);
+        let q = [(c * px - s * py + rel[1]) as f32, (s * px + c * py + rel[2]) as f32, (p[2] as f64 + rel[3]) as f32];
+        let d = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt();
+        if d < 1.0 {
+            continue;
+        }
+        let (ia, ie) = depth_bin(q);
+        let (mut m, mut known) = (f32::MAX, 0);
+        for de in -2i64..=2 {
+            for da in -2i64..=2 {
+                let e = ie as i64 + de;
+                if !(0..NEL as i64).contains(&e) {
+                    continue;
+                }
+                let v = a.depth[e as usize * NAZ + (ia as i64 + da).rem_euclid(NAZ as i64) as usize];
+                if v > 0.0 {
+                    m = m.min(v);
+                    known += 1;
+                }
+            }
+        }
+        if known < 3 {
+            continue;
+        }
+        tested += 1;
+        if d < m - 0.3f32.max(0.05 * d) {
+            through += 1;
+        }
+    }
+    (tested >= 500).then(|| through as f64 / tested as f64)
+}
+
+/// Point-to-plane distances (m) of B's flat points to A's surfaces, by `rel`,
+/// where both surfaces face the same way (so corners and bushes don't pair
+/// up different surfaces).
+fn surface_gaps(a: &Prepared, b: &Prepared, rel: P4) -> Vec<f32> {
+    let (s, c) = rel[0].sin_cos();
+    let idx: Vec<usize> = (0..b.pts.len()).filter(|&i| b.planar[i]).collect();
+    let every = (idx.len() / 10_000).max(1);
+    let mut out = Vec::new();
+    for &i in idx.iter().step_by(every) {
+        let p = b.pts[i];
+        let (px, py) = (p[0] as f64, p[1] as f64);
+        let q = [(c * px - s * py + rel[1]) as f32, (s * px + c * py + rel[2]) as f32, (p[2] as f64 + rel[3]) as f32];
+        let Some((j, _)) = a.tree.nearest(q, 0.15) else { continue };
+        if !a.planar[j] {
+            continue;
+        }
+        let (aq, n) = (a.pts[j], a.normal[j]);
+        let nb = b.normal[i];
+        let nb = [c as f32 * nb[0] - s as f32 * nb[1], s as f32 * nb[0] + c as f32 * nb[1], nb[2]];
+        if (n[0] * nb[0] + n[1] * nb[1] + n[2] * nb[2]).abs() < 0.9 {
+            continue;
+        }
+        out.push(((q[0] - aq[0]) * n[0] + (q[1] - aq[1]) * n[1] + (q[2] - aq[2]) * n[2]).abs());
+    }
+    out
+}
+
+/// How far the ground A saw around B's tripod is from B's own ground (m):
+/// flat, level points 1.5–4 m out from B (the X9 can't see right under
+/// itself), compared cell by cell (0.5 m) so a slope doesn't count; the
+/// median over the cells both saw.
+fn ground_gap(a: &Prepared, b: &Prepared, rel: P4) -> Option<f64> {
+    let (s, c) = rel[0].sin_cos();
+    let (cx, cy) = (rel[1], rel[2]);
+    let level = |k: usize, p: &Prepared| p.planar[k] && p.normal[k][2].abs() > 0.95;
+    let mut cells: HashMap<(i32, i32), (Vec<f32>, Vec<f32>)> = HashMap::new();
+    for (k, p) in b.pts.iter().enumerate() {
+        let r = p[0].hypot(p[1]);
+        if !(1.5..=4.0).contains(&r) || p[2] > -0.5 || !level(k, b) {
+            continue;
+        }
+        let (x, y) = (c * p[0] as f64 - s * p[1] as f64 + cx, s * p[0] as f64 + c * p[1] as f64 + cy);
+        cells.entry(((x / 0.5).floor() as i32, (y / 0.5).floor() as i32)).or_default().0.push((p[2] as f64 + rel[3]) as f32);
+    }
+    for (k, p) in a.pts.iter().enumerate() {
+        let r = (p[0] as f64 - cx).hypot(p[1] as f64 - cy);
+        if !(1.5..=4.0).contains(&r) || !level(k, a) {
+            continue;
+        }
+        if let Some(e) = cells.get_mut(&(((p[0] as f64) / 0.5).floor() as i32, ((p[1] as f64) / 0.5).floor() as i32)) {
+            e.1.push(p[2]);
+        }
+    }
+    let med = |v: &mut Vec<f32>| {
+        v.sort_by(|x, y| x.total_cmp(y));
+        v[v.len() / 2]
+    };
+    let mut diffs: Vec<f32> = cells
+        .into_values()
+        .filter(|(o, t)| o.len() >= 3 && t.len() >= 3)
+        .map(|(mut o, mut t)| med(&mut t) - med(&mut o))
+        .filter(|d| d.abs() < 0.5)
+        .collect();
+    (diffs.len() >= 5).then(|| med(&mut diffs) as f64)
 }
 
 /// Match B against A (ids for the record): a coarse search, then ICP.
@@ -579,45 +832,94 @@ pub fn pair(a_id: &str, a: &Prepared, b_id: &str, b: &Prepared) -> Pair {
     let mut tried: Vec<(Fit, f32)> = Vec::new();
     if a.slice.len() >= 50 && b.slice.len() >= 50 {
         for (theta, t, sc) in coarse.hypotheses(&a.slice, &b.slice) {
-            if let Some(r) = icp(a, b, theta as f64, [t[0] as f64, t[1] as f64, 0.0]) {
-                tried.push((r, sc));
+            if let Some(f) = icp(a, b, theta as f64, [t[0] as f64, t[1] as f64, 0.0]) {
+                tried.push((f, sc));
             }
         }
     }
-    best_pair(a_id, b_id, tried)
+    judge_pair(a_id, a, b_id, b, tried)
 }
 
 /// Match B against A from a guess of B in A (turn rad, x, y, z): ICP only.
 pub fn pair_from(a_id: &str, a: &Prepared, b_id: &str, b: &Prepared, guess: [f64; 4]) -> Pair {
-    let tried = icp(a, b, guess[0], [guess[1], guess[2], guess[3]]).map(|r| (r, f32::NAN)).into_iter().collect();
-    best_pair(a_id, b_id, tried)
+    let tried = icp(a, b, guess[0], [guess[1], guess[2], guess[3]]).map(|f| (f, f32::NAN)).into_iter().collect();
+    judge_pair(a_id, a, b_id, b, tried)
 }
 
-fn best_pair(a_id: &str, b_id: &str, tried: Vec<(Fit, f32)>) -> Pair {
-    let good = |r: &Fit| r.2 <= GOOD_RMS_M;
-    let best = tried.into_iter().max_by(|x, y| {
-        let kx = (good(&x.0), if good(&x.0) { x.0 .4 as f64 } else { -x.0 .2 });
-        let ky = (good(&y.0), if good(&y.0) { y.0 .4 as f64 } else { -y.0 .2 });
-        kx.partial_cmp(&ky).unwrap_or(std::cmp::Ordering::Equal)
-    });
+fn fits(f: &Fit) -> bool {
+    f.rms <= GOOD_RMS_M && f.matches >= GOOD_MATCHES
+}
+
+fn distinct(x: &Fit, y: &Fit) -> bool {
+    let dm = ((x.x[1] - y.x[1]).powi(2) + (x.x[2] - y.x[2]).powi(2) + (x.x[3] - y.x[3]).powi(2)).sqrt();
+    wrap(x.x[0] - y.x[0]).to_degrees().abs() > DISTINCT_DEG || dm > DISTINCT_M
+}
+
+/// Pick the pair's fit and say whether it counts: it must fit, be held
+/// firmly in every direction, and be the only good fit, or the one free space
+/// allows (a rival that puts points where the other station saw through loses).
+fn judge_pair(a_id: &str, a: &Prepared, b_id: &str, b: &Prepared, mut tried: Vec<(Fit, f32)>) -> Pair {
+    let key = |f: &Fit| (fits(f), if fits(f) { f.matches as f64 } else { -f.rms });
+    tried.sort_by(|x, y| key(&y.0).partial_cmp(&key(&x.0)).unwrap_or(std::cmp::Ordering::Equal));
     let r3 = |v: f64| (v * 1000.0).round() / 1000.0;
-    match best {
-        None => Pair { a: a_id.into(), b: b_id.into(), turn_deg: 0.0, shift_m: [0.0; 3], rms_mm: None, matches: 0, overlap: 0.0,
-                       coarse_score: 0.0, good: false, left_mm: None, left_deg: None, outlier: false },
-        Some(((turn, shift, rms, overlap, matches), sc)) => Pair {
-            a: a_id.into(),
-            b: b_id.into(),
-            turn_deg: r3(turn.to_degrees().rem_euclid(360.0)),
-            shift_m: shift.map(r3),
-            rms_mm: Some((rms * 10_000.0).round() / 10.0),
-            matches,
-            overlap: r3(overlap),
-            coarse_score: if sc.is_nan() { 0.0 } else { r3(sc as f64) },
-            good: rms <= GOOD_RMS_M && matches >= GOOD_MATCHES,
-            left_mm: None,
-            left_deg: None,
-            outlier: false,
-        },
+    let Some(&best) = tried.first() else {
+        return Pair { a: a_id.into(), b: b_id.into(), turn_deg: 0.0, shift_m: [0.0; 3], rms_mm: None, matches: 0, overlap: 0.0,
+                      coarse_score: 0.0, good: false, constraint: 0.0, weak: None, ambiguous: false, resolved_by: None,
+                      rejected: Some("too few matches".into()), left_mm: None, left_deg: None, outlier: false };
+    };
+    let mut rivals: Vec<(Fit, f32)> = vec![best];
+    if fits(&best.0) {
+        for &(f, sc) in &tried[1..] {
+            if fits(&f) && f.matches as f64 >= RIVAL_SHARE * best.0.matches as f64 && rivals.iter().all(|r| distinct(&r.0, &f)) {
+                rivals.push((f, sc));
+            }
+        }
+    }
+    let (mut chosen, mut ambiguous, mut resolved_by) = (best, false, None);
+    if rivals.len() > 1 {
+        let mut scored: Vec<((Fit, f32), f64)> = rivals
+            .iter()
+            .map(|r| (*r, free_space(a, b, r.0.x).unwrap_or(0.0).max(free_space(b, a, invert(r.0.x)).unwrap_or(0.0))))
+            .collect();
+        scored.sort_by(|x, y| x.1.total_cmp(&y.1));
+        if scored[1].1 >= FREE_SPACE_RIVAL && scored[0].1 * 3.0 <= scored[1].1 {
+            chosen = scored[0].0;
+            resolved_by = Some(format!("free space ({} rival fits)", rivals.len()));
+        } else {
+            ambiguous = true;
+        }
+    }
+    let (f, sc) = chosen;
+    let (constraint, weak) = weakest(&f);
+    let rejected = if f.rms > GOOD_RMS_M {
+        Some(format!("fit {:.0} mm (needs {:.0} or less)", f.rms * 1000.0, GOOD_RMS_M * 1000.0))
+    } else if f.matches < GOOD_MATCHES {
+        Some(format!("{} matched points (needs {GOOD_MATCHES})", f.matches))
+    } else if constraint < CONSTRAINT_MIN {
+        Some(format!("weakly held: {weak}"))
+    } else if ambiguous {
+        Some(format!("ambiguous: {} different fits are as good and free space can't tell them apart", rivals.len()))
+    } else {
+        None
+    };
+    Pair {
+        a: a_id.into(),
+        b: b_id.into(),
+        turn_deg: r3(f.x[0].to_degrees().rem_euclid(360.0)),
+        shift_m: [f.x[1], f.x[2], f.x[3]].map(r3),
+        rms_mm: Some((f.rms * 10_000.0).round() / 10.0),
+        matches: f.matches,
+        overlap: r3(f.overlap),
+        coarse_score: if sc.is_nan() { 0.0 } else { r3(sc as f64) },
+        good: rejected.is_none(),
+        constraint: (constraint * 10_000.0).round() / 10_000.0,
+        weak: (constraint < CONSTRAINT_MIN).then_some(weak),
+        ambiguous,
+        resolved_by,
+        rejected,
+        left_mm: None,
+        left_deg: None,
+        outlier: false,
     }
 }
 
@@ -788,7 +1090,8 @@ impl Pose {
 /// that gives a predicted pose, and the other placed stations within reach
 /// are matched from the prediction (ICP only, no search). `say` hears progress.
 pub fn register_all(ids: &[String], prep: &[&Prepared], mut pairs: Vec<Pair>, say: &dyn Fn(usize, usize)) -> (Vec<Pair>, Vec<Option<Pose>>) {
-    pairs.retain(|p| ids.contains(&p.a) && ids.contains(&p.b));
+    // Pairs matched before the checks existed (constraint 0) are matched again.
+    pairs.retain(|p| ids.contains(&p.a) && ids.contains(&p.b) && !(p.good && p.constraint == 0.0));
     let mut poses = solve(ids, &mut pairs);
     let n = ids.len();
     for b in 1..n {
@@ -831,6 +1134,155 @@ pub fn register_all(ids: &[String], prep: &[&Prepared], mut pairs: Vec<Pair>, sa
     (pairs, poses)
 }
 
+// ------------------------------------------------------------------- audit ---
+
+/// A station's independent checks and verdict.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Audit {
+    /// `confirmed`: tied by two or more pairs that count, and no independent
+    /// check disagrees; `single`: one such tie; `frame`: the only station;
+    /// `doubtful`: an independent check disagrees with most of its
+    /// neighbours; `ambiguous`: only rival fits; `unplaced`.
+    pub verdict: String,
+    /// The stations its counting pairs tie it to (scan ids).
+    pub ties: Vec<String>,
+    /// Its flat points' distance to its neighbours' surfaces (median, p90, mm).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface_mm: Option<[f64; 2]>,
+    /// The worst share of points lying where a neighbour saw through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_space: Option<f64>,
+    /// The worst gap between its ground and a neighbour's around its tripod (mm).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ground_mm: Option<f64>,
+    /// The largest move a firm re-fit against a neighbour asks for (mm, °).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refit: Option<[f64; 2]>,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+}
+
+impl Audit {
+    /// Counts towards coverage.
+    pub fn trusted(&self) -> bool {
+        matches!(self.verdict.as_str(), "confirmed" | "single" | "frame")
+    }
+}
+
+/// Check every placed station against every neighbour it overlaps, under the
+/// final poses: a fresh fit from those poses (how far it wants to move the
+/// station), where each saw straight through, how its surfaces sit on
+/// theirs, and the ground under its tripod. Each check votes among the
+/// neighbours it has evidence for; a station is doubtful when any check finds
+/// it off against more than half of those. `names` label stations in the
+/// reasons.
+pub fn audit(ids: &[String], names: &[String], prep: &[&Prepared], poses: &[Option<Pose>], pairs: &[Pair]) -> Vec<Audit> {
+    let n = ids.len();
+    let placed: Vec<usize> = (0..n).filter(|&k| poses[k].is_some()).collect();
+    let near = |i: usize, j: usize| {
+        let (p, q) = (poses[i].expect("placed"), poses[j].expect("placed"));
+        (p.xyz_m[0] - q.xyz_m[0]).hypot(p.xyz_m[1] - q.xyz_m[1]) < 2.0 * RANGE as f64
+    };
+    let jobs: Vec<(usize, usize)> = placed.iter().flat_map(|&i| placed.iter().filter(move |&&j| j > i).map(move |&j| (i, j))).filter(|&(i, j)| near(i, j)).collect();
+    type Checks = (Vec<f32>, Option<f64>, Option<f64>, Option<[f64; 2]>);
+    let checks: Vec<Checks> = par_map(jobs.len(), |k| {
+        let (i, j) = jobs[k];
+        let rel = relative(poses[i].expect("placed").p4(), poses[j].expect("placed").p4());
+        // Only a fit that is good and firmly held is evidence.
+        let refit = icp(prep[i], prep[j], rel[0], [rel[1], rel[2], rel[3]]).filter(|f| fits(f) && weakest(f).0 >= CONSTRAINT_MIN).map(|f| {
+            let mm = ((f.x[1] - rel[1]).powi(2) + (f.x[2] - rel[2]).powi(2) + (f.x[3] - rel[3]).powi(2)).sqrt() * 1000.0;
+            [(mm * 10.0).round() / 10.0, (wrap(f.x[0] - rel[0]).to_degrees().abs() * 1000.0).round() / 1000.0]
+        });
+        let mut gaps = surface_gaps(prep[i], prep[j], rel);
+        gaps.extend(surface_gaps(prep[j], prep[i], invert(rel)));
+        let fs = [free_space(prep[i], prep[j], rel), free_space(prep[j], prep[i], invert(rel))].into_iter().flatten().reduce(f64::max);
+        let gr = [ground_gap(prep[i], prep[j], rel), ground_gap(prep[j], prep[i], invert(rel))].into_iter().flatten().reduce(|x, y| if y.abs() > x.abs() { y } else { x });
+        (gaps, fs, gr, refit)
+    });
+    let pct = |v: &mut Vec<f32>| -> Option<[f64; 2]> {
+        if v.len() < 300 {
+            return None;
+        }
+        v.sort_by(|x, y| x.total_cmp(y));
+        let at = |q: f64| ((v[((v.len() - 1) as f64 * q) as usize] as f64) * 10_000.0).round() / 10.0;
+        Some([at(0.5), at(0.9)])
+    };
+    (0..n)
+        .map(|k| {
+            let mut a = Audit::default();
+            if poses[k].is_none() {
+                let rival = pairs.iter().any(|p| p.ambiguous && (p.a == ids[k] || p.b == ids[k]));
+                a.verdict = if rival { "ambiguous" } else { "unplaced" }.into();
+                a.reasons.push(if rival {
+                    "it fits in more than one place (symmetric or repeated walls), and free space can't tell which".into()
+                } else {
+                    "it shares too little firmly held wall with the placed stations".into()
+                });
+                return a;
+            }
+            for p in pairs.iter().filter(|p| p.good && !p.outlier) {
+                let other = if p.a == ids[k] { &p.b } else if p.b == ids[k] { &p.a } else { continue };
+                if ids.iter().position(|x| x == other).is_some_and(|o| poses[o].is_some()) && !a.ties.contains(other) {
+                    a.ties.push(other.clone());
+                }
+            }
+            // Per check: (neighbours with evidence, neighbours it disagrees with).
+            let mut votes = [(0usize, 0usize); 4];
+            let mut gaps = Vec::new();
+            for (q, &(i, j)) in jobs.iter().enumerate() {
+                if i != k && j != k {
+                    continue;
+                }
+                let other = &names[if i == k { j } else { i }];
+                let (g, fs, gr, refit) = &checks[q];
+                let mut g = g.clone();
+                let mut vote = |c: usize, bad: bool, why: String| {
+                    votes[c].0 += 1;
+                    if bad {
+                        votes[c].1 += 1;
+                        a.reasons.push(why);
+                    }
+                };
+                if let Some([mm, deg]) = *refit {
+                    let w = a.refit.unwrap_or([0.0, 0.0]);
+                    a.refit = Some([w[0].max(mm), w[1].max(deg)]);
+                    vote(0, mm > REFIT_BAD_MM || deg > REFIT_BAD_DEG, format!("a fresh fit against station {other} moves it {mm:.0} mm and {deg:.2}°"));
+                }
+                if let Some(f) = *fs {
+                    a.free_space = Some(a.free_space.unwrap_or(0.0).max((f * 1000.0).round() / 1000.0));
+                    vote(1, f > FREE_SPACE_BAD, format!("{:.0}% of its wall points lie where station {other} saw straight through", f * 100.0));
+                }
+                if let Some([p50, _]) = pct(&mut g) {
+                    vote(2, p50 > SURFACE_BAD_MM, format!("its surfaces sit {p50:.0} mm off station {other}'s"));
+                }
+                if let Some(d) = *gr {
+                    let mm = (d * 1000.0).round();
+                    if a.ground_mm.is_none_or(|w| mm.abs() > w.abs()) {
+                        a.ground_mm = Some(mm);
+                    }
+                    vote(3, d.abs() > GROUND_BAD_M, format!("the ground under it is {mm:.0} mm off station {other}'s"));
+                }
+                gaps.extend(g);
+            }
+            // A strict majority: with three stations, the one wrong station
+            // doesn't drag a neighbour down with it.
+            let disagree = votes.iter().any(|&(n, bad)| bad * 2 > n);
+            a.surface_mm = pct(&mut gaps);
+            a.verdict = if disagree {
+                "doubtful"
+            } else {
+                match a.ties.len() {
+                    0 => "frame",
+                    1 => "single",
+                    _ => "confirmed",
+                }
+            }
+            .into();
+            a
+        })
+        .collect()
+}
+
 // -------------------------------------------------------------- the record ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -839,6 +1291,8 @@ pub struct StationPose {
     pub station: u16,
     /// None: not placed (no pair with a placed station fits).
     pub pose: Option<Pose>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<Audit>,
 }
 
 /// A project's registration as the bridge keeps it (`registrations.json`).
@@ -855,9 +1309,14 @@ pub struct Registration {
 }
 
 impl Registration {
-    /// Placed stations' scan ids by station number.
+    /// Trusted stations' scan ids by station number: placed, and confirmed,
+    /// single or the frame. Only these count towards coverage.
     pub fn station_scans(&self) -> HashMap<u16, String> {
-        self.stations.iter().filter(|s| s.pose.is_some()).map(|s| (s.station, s.scan_id.clone())).collect()
+        self.stations
+            .iter()
+            .filter(|s| s.pose.is_some() && s.audit.as_ref().is_none_or(Audit::trusted))
+            .map(|s| (s.station, s.scan_id.clone()))
+            .collect()
     }
 
     /// "12 of 12 stations in one frame; 26 pairs agree within 9 mm"
@@ -867,7 +1326,7 @@ impl Registration {
         let worst = used.iter().filter_map(|p| p.left_mm).fold(0f64, f64::max);
         let rms = used.iter().filter_map(|p| p.rms_mm).fold(0f64, f64::max);
         let s = |u: usize| if u == 1 { "" } else { "s" };
-        self.summary = match (self.stations.len(), used.len()) {
+        let mut summary = match (self.stations.len(), used.len()) {
             (0, _) => "No full domes in this project yet.".into(),
             (1, _) => "One station: it is the project frame.".into(),
             (n, 0) => format!("{placed} of {n} stations in one frame; no pairs fit yet."),
@@ -875,6 +1334,16 @@ impl Registration {
             (n, u) if u < placed => format!("{placed} of {n} stations in one frame; {u} pair{} fit within {rms:.0} mm (no loop to cross-check yet).", s(u)),
             (n, u) => format!("{placed} of {n} stations in one frame; {u} pair{} agree within {worst:.0} mm.", s(u)),
         };
+        let count = |v: &str| self.stations.iter().filter(|s| s.audit.as_ref().is_some_and(|a| a.verdict == v)).count();
+        let verdicts: Vec<String> = ["confirmed", "single", "doubtful", "ambiguous", "unplaced"]
+            .iter()
+            .filter(|v| count(v) > 0)
+            .map(|v| format!("{} {v}", count(v)))
+            .collect();
+        if self.stations.len() > 1 && !verdicts.is_empty() {
+            summary = format!("{} Stations: {}.", summary, verdicts.join(", "));
+        }
+        self.summary = summary;
     }
 
     pub fn to_json(&self) -> Value {
@@ -885,13 +1354,23 @@ impl Registration {
             "frame": format!("station {frame}'s scanner: x and y as it happened to face (not north), z up, the origin at its centre; metres"),
             "summary": self.summary,
             "updated_at": self.updated_at,
-            "stations": self.stations.iter().map(|s| json!({
-                "station": s.station, "scan_id": s.scan_id, "placed": s.pose.is_some(),
-                "turn_deg": s.pose.map(|p| p.turn_deg), "xyz_m": s.pose.map(|p| p.xyz_m),
-            })).collect::<Vec<_>>(),
+            "stations": self.stations.iter().map(|s| {
+                let a = s.audit.clone().unwrap_or_default();
+                json!({
+                    "station": s.station, "scan_id": s.scan_id, "placed": s.pose.is_some(),
+                    "turn_deg": s.pose.map(|p| p.turn_deg), "xyz_m": s.pose.map(|p| p.xyz_m),
+                    "verdict": a.verdict, "counts_for_coverage": s.pose.is_some() && a.trusted(),
+                    "tied_to": a.ties.iter().filter_map(|t| number(t)).collect::<Vec<_>>(),
+                    "checks": {"surface_mm": a.surface_mm, "free_space": a.free_space, "ground_mm": a.ground_mm},
+                    "reasons": a.reasons,
+                })
+            }).collect::<Vec<_>>(),
             "pairs": self.pairs.iter().filter(|p| p.good).map(|p| json!({
                 "stations": [number(&p.a), number(&p.b)], "rms_mm": p.rms_mm, "matches": p.matches,
-                "left_mm": p.left_mm, "outlier": p.outlier,
+                "constraint": p.constraint, "resolved_by": p.resolved_by, "left_mm": p.left_mm, "outlier": p.outlier,
+            })).collect::<Vec<_>>(),
+            "rejected_pairs": self.pairs.iter().filter(|p| p.weak.is_some() || p.ambiguous).map(|p| json!({
+                "stations": [number(&p.a), number(&p.b)], "rms_mm": p.rms_mm, "matches": p.matches, "why": p.rejected,
             })).collect::<Vec<_>>(),
             "pairs_tried": self.pairs.len(),
             "walls": self.walls,
@@ -1159,6 +1638,10 @@ pub fn face_coverage(m: &Merged, f: &Face, station_scan: &HashMap<u16, String>) 
     let mut spacing: Vec<f32> = Vec::new();
     let mut zs: Vec<f32> = Vec::new();
     for (i, p) in m.pts.iter().enumerate() {
+        // Only stations that count (see `Registration::station_scans`).
+        if !station_scan.contains_key(&m.station[i]) {
+            continue;
+        }
         let (dx, dy) = (p[0] - a[0], p[1] - a[1]);
         let u = dx * dir[0] + dy * dir[1];
         if u < 0.0 || u > len || (dx * nrm[0] + dy * nrm[1]).abs() > FACE_TOL {
@@ -1206,7 +1689,8 @@ pub fn face_coverage(m: &Merged, f: &Face, station_scan: &HashMap<u16, String>) 
 
 /// What to draw on the plan besides the points.
 pub struct PlanMarks<'a> {
-    pub stations: &'a [(u16, Pose)],
+    /// Number, pose, and whether it counts (others are drawn amber, "5?").
+    pub stations: &'a [(u16, Pose, bool)],
     pub walls: &'a [Wall],
     /// Target faces: id, face, colour.
     pub faces: Vec<(String, Face, [u8; 3])>,
@@ -1271,13 +1755,15 @@ pub fn plan_png(m: &Merged, marks: &PlanMarks) -> Vec<u8> {
         c.line(a, b, *col, 5.0);
         c.text(&font, 18.0, ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0 + 8.0), 0.5, id, *col);
     }
-    for (n, pose) in marks.stations {
+    for (n, pose, counts) in marks.stations {
         let (px, py) = to_px(pose.xyz_m[0] as f32, pose.xyz_m[1] as f32);
-        c.ellipse((px, py), (7.0, 7.0), [255, 255, 255], 1.0, true);
+        let col = if *counts { [255, 255, 255] } else { [251, 191, 36] };
+        c.ellipse((px, py), (7.0, 7.0), col, 1.0, true);
         // A tick for the way that station's scanner faced (its x axis).
         let t = pose.turn_deg.to_radians() as f32;
-        c.line((px, py), (px + 16.0 * t.cos(), py - 16.0 * t.sin()), [255, 255, 255], 2.0);
-        c.text(&font, 20.0, (px + 12.0, py - 32.0), 0.0, &n.to_string(), [255, 255, 255]);
+        c.line((px, py), (px + 16.0 * t.cos(), py - 16.0 * t.sin()), col, 2.0);
+        let label = if *counts { n.to_string() } else { format!("{n}?") };
+        c.text(&font, 20.0, (px + 12.0, py - 32.0), 0.0, &label, col);
     }
     c.text(&font, 16.0, (12.0, h as f32 - 34.0), 0.0, "grid 5 m · project frame (station 1's), not north", [203, 213, 225]);
     c.png()
@@ -1285,53 +1771,94 @@ pub fn plan_png(m: &Merged, marks: &PlanMarks) -> Vec<u8> {
 
 // -------------------------------------------------------------- offline run ---
 
-/// `x9-bridge register OUT_DIR STATION.tzf …`: register scan files offline
-/// (the first is the frame) and write poses.json, pairs.json, walls.json and
-/// plan.png to OUT_DIR, with timings. For checking and benchmarking.
+/// `x9-bridge register [--perturb N:dx,dy,deg] [--truth poses.json] OUT_DIR
+/// STATION.tzf …`: register scan files offline (the first is the frame), as
+/// the bridge does, one station more each time, then audit. Writes
+/// poses.json, pairs.json, audit.json, walls.json and plan.png to OUT_DIR,
+/// with timings. `--perturb` moves station N (1-based) after the solve, a
+/// planted wrong placement the audit should catch; `--truth` compares the
+/// poses with known ones (a poses.json from an earlier run).
 pub fn cli(args: &[String]) -> anyhow::Result<()> {
     use anyhow::Context;
-    let [out, files @ ..] = args else { anyhow::bail!("usage: x9-bridge register OUT_DIR STATION.tzf …") };
+    let mut perturb: Option<(usize, [f64; 3])> = None;
+    let mut truth: Option<Vec<Option<Pose>>> = None;
+    let mut rest: Vec<&String> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--perturb" => {
+                let v = it.next().context("--perturb N:dx,dy,deg")?;
+                let (n, d) = v.split_once(':').context("--perturb N:dx,dy,deg")?;
+                let d: Vec<f64> = d.split(',').map(str::parse).collect::<Result<_, _>>()?;
+                anyhow::ensure!(d.len() == 3, "--perturb N:dx,dy,deg");
+                perturb = Some((n.parse()?, [d[0], d[1], d[2]]));
+            }
+            "--truth" => truth = Some(serde_json::from_slice(&std::fs::read(it.next().context("--truth poses.json")?)?)?),
+            _ => rest.push(a),
+        }
+    }
+    let [out, files @ ..] = &rest[..] else { anyhow::bail!("usage: x9-bridge register [--perturb N:dx,dy,deg] [--truth poses.json] OUT_DIR STATION.tzf …") };
     std::fs::create_dir_all(out)?;
     let t0 = std::time::Instant::now();
     let mut clouds = Vec::new();
     for f in files {
-        let t = trimble_tzf::Tzf::open(std::path::Path::new(f)).with_context(|| format!("opening {f}"))?;
+        let t = trimble_tzf::Tzf::open(std::path::Path::new(f.as_str())).with_context(|| format!("opening {f}"))?;
         let meta = t.scan_meta().with_context(|| format!("{f}: metadata"))?;
         let pts = t.grid_points().with_context(|| format!("{f}: decoding"))?;
-        let c = Cloud::from_grid(&pts, crate::view::step_rad(&meta));
-        eprintln!("{f}: {} points -> {} voxels ({:.1} s)", pts.len(), c.pts.len(), t0.elapsed().as_secs_f64());
-        clouds.push(c);
+        clouds.push(Cloud::from_grid(&pts, crate::view::step_rad(&meta)));
     }
-    let t1 = std::time::Instant::now();
+    eprintln!("decoded {} stations in {:.1} s", files.len(), t0.elapsed().as_secs_f64());
     let prep: Vec<Prepared> = clouds.iter().map(prepare).collect();
-    eprintln!("prepared in {:.1} s", t1.elapsed().as_secs_f64());
     let ids: Vec<String> = (1..=files.len()).map(|i| i.to_string()).collect();
-    // As the bridge runs it: one station more each time, keeping earlier pairs.
     let (mut pairs, mut poses) = (Vec::new(), Vec::new());
     for k in 1..=files.len() {
         let t = std::time::Instant::now();
         let refs: Vec<&Prepared> = prep[..k].iter().collect();
-        (pairs, poses) = register_all(&ids[..k], &refs, pairs, &|b, a| eprintln!("  searching station {} against {}", b + 1, a + 1));
-        let fits: Vec<String> = pairs.iter().filter(|p| p.good && (p.a == ids[k - 1] || p.b == ids[k - 1])).map(|p| format!("{}-{} {} mm", p.a, p.b, p.rms_mm.unwrap_or(f64::NAN))).collect();
-        eprintln!("station {k}: {} ({:.1} s) fits {}", if poses[k - 1].is_some() { "placed" } else { "NOT placed" }, t.elapsed().as_secs_f64(), fits.join(", "));
+        (pairs, poses) = register_all(&ids[..k], &refs, pairs, &|_, _| {});
+        eprintln!("station {k}: {} ({:.1} s)", if poses[k - 1].is_some() { "placed" } else { "NOT placed" }, t.elapsed().as_secs_f64());
+    }
+    for p in pairs.iter().filter(|p| p.rms_mm.is_some()) {
+        eprintln!("  pair {}-{}: rms {:?} mm, {} matches, constraint {:.4}{}{}", p.a, p.b, p.rms_mm, p.matches, p.constraint,
+                  p.resolved_by.as_deref().map(|r| format!(", resolved by {r}")).unwrap_or_default(),
+                  p.rejected.as_deref().map(|r| format!(" — not used: {r}")).unwrap_or_default());
+    }
+    if let Some((n, [dx, dy, deg])) = perturb {
+        if let Some(Some(p)) = poses.get_mut(n - 1) {
+            p.xyz_m[0] += dx;
+            p.xyz_m[1] += dy;
+            p.turn_deg += deg;
+            eprintln!("planted: station {n} moved by ({dx}, {dy}) m and {deg}°");
+        }
+    }
+    let t = std::time::Instant::now();
+    let refs: Vec<&Prepared> = prep.iter().collect();
+    let audits = audit(&ids, &ids, &refs, &poses, &pairs);
+    eprintln!("audit in {:.1} s", t.elapsed().as_secs_f64());
+    for (k, a) in audits.iter().enumerate() {
+        let off = truth.as_ref().and_then(|tr| Some((tr.get(k)?.as_ref()?, poses[k].as_ref()?))).map(|(t, p)| {
+            let mm = ((t.xyz_m[0] - p.xyz_m[0]).powi(2) + (t.xyz_m[1] - p.xyz_m[1]).powi(2) + (t.xyz_m[2] - p.xyz_m[2]).powi(2)).sqrt() * 1000.0;
+            format!(", {mm:.0} mm from truth")
+        });
+        eprintln!("station {:>2}: {:<9} ties {:?} surface {:?} mm, refit {:?}, free space {:?}, ground {:?} mm{}{}", k + 1, a.verdict, a.ties, a.surface_mm, a.refit,
+                  a.free_space, a.ground_mm, off.unwrap_or_default(),
+                  if a.reasons.is_empty() { String::new() } else { format!("\n             {}", a.reasons.join("; ")) });
     }
     let mut merged = Merged::default();
     let mut stations = Vec::new();
     for (k, p) in poses.iter().enumerate() {
         if let Some(p) = p {
             merged.add(&prep[k], clouds[k].step_rad, p, k as u16 + 1);
-            stations.push((k as u16 + 1, *p));
+            stations.push((k as u16 + 1, *p, audits[k].trusted()));
         }
     }
     let ws = walls(&merged);
     std::fs::write(format!("{out}/poses.json"), serde_json::to_vec_pretty(&poses)?)?;
     std::fs::write(format!("{out}/pairs.json"), serde_json::to_vec_pretty(&pairs)?)?;
+    std::fs::write(format!("{out}/audit.json"), serde_json::to_vec_pretty(&audits)?)?;
     std::fs::write(format!("{out}/walls.json"), serde_json::to_vec_pretty(&ws)?)?;
     std::fs::write(format!("{out}/plan.png"), plan_png(&merged, &PlanMarks { stations: &stations, walls: &ws, faces: vec![] }))?;
-    let used = pairs.iter().filter(|p| p.good && !p.outlier).count();
-    let worst = pairs.iter().filter_map(|p| p.left_mm).fold(0f64, f64::max);
-    eprintln!("{} of {} stations registered, {used} pairs, worst leftover {worst} mm, {} walls; total {:.1} s",
-              poses.iter().flatten().count(), poses.len(), ws.len(), t0.elapsed().as_secs_f64());
+    eprintln!("{} of {} placed, {} trusted; total {:.1} s", poses.iter().flatten().count(), poses.len(),
+              audits.iter().filter(|a| a.trusted()).count(), t0.elapsed().as_secs_f64());
     Ok(())
 }
 
@@ -1388,7 +1915,8 @@ mod tests {
         let truth3 = [1.2f64, -2.0, 4.0, 0.0];
         let mk = |a: &str, b: &str, rel: P4, good: bool| Pair {
             a: a.into(), b: b.into(), turn_deg: rel[0].to_degrees(), shift_m: [rel[1], rel[2], rel[3]], rms_mm: Some(10.0),
-            matches: 20000, overlap: 0.3, coarse_score: 0.5, good, left_mm: None, left_deg: None, outlier: false,
+            matches: 20000, overlap: 0.3, coarse_score: 0.5, good, constraint: 0.2, weak: None, ambiguous: false, resolved_by: None,
+            rejected: None, left_mm: None, left_deg: None, outlier: false,
         };
         let rel23 = relative(truth2, truth3);
         let mut wrong = rel23;
@@ -1424,6 +1952,118 @@ mod tests {
         assert_eq!(v["covered"], true);
         assert_eq!(v["stations"][0]["scan_id"], "scan-1");
         assert_eq!(v["unseen"][0]["to"], json!([10.0, 5.0]));
+    }
+
+    #[test]
+    fn jacobi_finds_every_eigenpair() {
+        let a = vec![4.0, 1.0, 0.5, 0.0, 1.0, 3.0, 0.2, 0.1, 0.5, 0.2, 2.0, 0.3, 0.0, 0.1, 0.3, 1.0];
+        let (vals, vecs) = sym_eigen(a.clone(), 4);
+        for k in 0..4 {
+            for i in 0..4 {
+                let av: f64 = (0..4).map(|j| a[i * 4 + j] * vecs[j * 4 + k]).sum();
+                assert!((av - vals[k] * vecs[i * 4 + k]).abs() < 1e-9);
+            }
+        }
+    }
+
+    type Rect = ([f32; 3], [f32; 3]);
+
+    /// The six faces of an axis-aligned box.
+    fn boxed(lo: [f32; 3], hi: [f32; 3]) -> Vec<Rect> {
+        (0..3)
+            .flat_map(|k| {
+                [lo[k], hi[k]].map(|v| {
+                    let (mut a, mut b) = (lo, hi);
+                    a[k] = v;
+                    b[k] = v;
+                    (a, b)
+                })
+            })
+            .collect()
+    }
+
+    /// Points 5 cm apart on axis-aligned rectangles, as a scanner at `at`
+    /// turned by `turn` (rad) gets them, within range. No occlusion: these
+    /// are rooms seen from inside.
+    fn scene(rects: &[Rect], at: [f32; 3], turn: f32) -> Cloud {
+        let (s, c) = turn.sin_cos();
+        let (mut pts, mut range) = (Vec::new(), Vec::new());
+        for &(lo, hi) in rects {
+            let steps = |k: usize| ((hi[k] - lo[k]) / 0.05).round() as usize;
+            for i in 0..=steps(0) {
+                for j in 0..=steps(1) {
+                    for k in 0..=steps(2) {
+                        let w = [lo[0] + i as f32 * 0.05, lo[1] + j as f32 * 0.05, lo[2] + k as f32 * 0.05];
+                        let d = [w[0] - at[0], w[1] - at[1], w[2] - at[2]];
+                        if d[0].hypot(d[1]) > RANGE {
+                            continue;
+                        }
+                        pts.push([c * d[0] + s * d[1], -s * d[0] + c * d[1], d[2]]);
+                        range.push((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt());
+                    }
+                }
+            }
+        }
+        Cloud { step_rad: 0.0005, pts, range }
+    }
+
+    /// A 12 × 8 m room, floor 1.5 m below the scanner, ceiling 1.2 m above.
+    fn room() -> Vec<Rect> {
+        boxed([-6.0, -4.0, -1.5], [6.0, 4.0, 1.2])
+    }
+
+    #[test]
+    fn a_corridor_is_weakly_held_along_its_length() {
+        let walls = vec![([-40.0, -1.5, -1.5], [40.0, -1.5, 1.0]), ([-40.0, 1.5, -1.5], [40.0, 1.5, 1.0]),
+                         ([-40.0, -1.5, -1.5], [40.0, 1.5, -1.5]), ([-40.0, -1.5, 1.0], [40.0, 1.5, 1.0])];
+        let (a, b) = (prepare(&scene(&walls, [0.0, 0.0, 0.0], 0.0)), prepare(&scene(&walls, [4.0, 0.0, 0.0], 0.0)));
+        let p = pair_from("a", &a, "b", &b, [0.0, 3.0, 0.0, 0.0]);
+        assert!(!p.good && p.constraint < CONSTRAINT_MIN, "{p:?}");
+        assert!(p.weak.as_deref().is_some_and(|w| w.contains("slide along (1.00,") || w.contains("slide along (-1.00,")), "{p:?}");
+    }
+
+    #[test]
+    fn a_symmetric_room_is_ambiguous() {
+        let r = room();
+        let (a, b) = (prepare(&scene(&r, [1.0, 0.5, 0.0], 0.0)), prepare(&scene(&r, [-2.0, -1.0, 0.0], 0.3)));
+        let p = pair("a", &a, "b", &b);
+        assert!(p.ambiguous && !p.good, "{p:?}");
+        assert!(p.rejected.as_deref().is_some_and(|r| r.contains("ambiguous")), "{p:?}");
+    }
+
+    /// A partition breaks the room's symmetry: the one right fit is found.
+    #[test]
+    fn a_partition_breaks_the_symmetry() {
+        let mut r = room();
+        r.push(([3.0, -4.0, -1.5], [3.0, -1.0, 0.5]));
+        let (a, b) = (prepare(&scene(&r, [1.0, 0.5, 0.0], 0.0)), prepare(&scene(&r, [-2.0, -1.0, 0.0], 0.3)));
+        let p = pair("a", &a, "b", &b);
+        assert!(p.good, "{p:?}");
+        assert!((p.turn_deg - 0.3f64.to_degrees()).abs() < 0.1, "{p:?}");
+        assert!((p.shift_m[0] + 3.0).abs() < 0.02 && (p.shift_m[1] + 1.5).abs() < 0.02 && p.shift_m[2].abs() < 0.02, "{p:?}");
+    }
+
+    /// Three stations in a room with a partition: placed right they are all
+    /// confirmed; one moved by 0.3 m (or turned 2°) is doubtful, alone.
+    #[test]
+    fn the_audit_finds_a_misplaced_station() {
+        let mut r = room();
+        r.push(([3.0, -4.0, -1.5], [3.0, -1.0, 0.5]));
+        r.extend(boxed([-5.0, 2.0, -1.5], [-4.0, 3.0, -0.5]));
+        let at = [([1.0, 0.5, 0.0], 0.0), ([-2.0, -1.0, 0.0], 0.3), ([-3.0, 1.5, 0.1], -1.0)];
+        let prep: Vec<Prepared> = at.iter().map(|(p, t)| prepare(&scene(&r, *p, *t))).collect();
+        let refs: Vec<&Prepared> = prep.iter().collect();
+        let ids: Vec<String> = ["1", "2", "3"].iter().map(|s| s.to_string()).collect();
+        let (pairs, poses) = register_all(&ids, &refs, vec![], &|_, _| {});
+        assert!(poses.iter().all(Option::is_some), "{pairs:?}");
+        let verdicts = |poses: &[Option<Pose>]| audit(&ids, &ids, &refs, poses, &pairs).into_iter().map(|a| a.verdict).collect::<Vec<_>>();
+        assert_eq!(verdicts(&poses), ["confirmed", "confirmed", "confirmed"]);
+        let mut moved = poses.clone();
+        moved[1].as_mut().unwrap().xyz_m[0] += 0.3;
+        assert_eq!(verdicts(&moved), ["confirmed", "doubtful", "confirmed"]);
+        let mut turned = poses.clone();
+        turned[2].as_mut().unwrap().turn_deg += 2.0;
+        assert_eq!(verdicts(&turned), ["confirmed", "confirmed", "doubtful"]);
     }
 
     #[test]
