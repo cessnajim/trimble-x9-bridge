@@ -899,7 +899,7 @@ curl -s -X POST -H "$H" $B/projects/$PROJECT/registration     # register again (
 | --- | --- |
 | Frame | The first station's scanner: x and y as it happened to face (not north), z up, metres. Describe places to people by landmarks and station numbers |
 | Stations | `placed`, `turn_deg`, `xyz_m`. A station that won't place shares too little wall with the placed ones; the field log says so and what to do |
-| Pairs | Those that fit (RMS under 15 mm over at least 8000 flat matches), with `left_mm`: how far the global fit left them from their own fit. Small numbers around a loop mean the loop closed |
+| Pairs | Those that fit (RMS under 15 mm over at least 2000 flat matches, held firmly and unique), with `left_mm`: how far the global fit left them from their own fit. Small numbers around a loop mean the loop closed |
 | Walls | Straight runs in the merged plan (points spanning at least 0.5 m of height), longest first: `wall_id`, `from`, `to`, `length_m`, `z_m`, `seen_by` (station numbers). Ids are renumbered on each registration |
 | Faces | `POST …/face` with a `wall_id` or `from`/`to`: `seen_share` of its length (0.5 m columns with at least 1 m of wall in points; windows leave the wall around them), `spacing_mm`, the stations that saw it and the `unseen` stretches. `covered` at 80% |
 
@@ -912,11 +912,11 @@ every station goes through checks that need no person:
 | Layer | What it catches | Rule |
 | --- | --- | --- |
 | Inputs | Unlevelled or short scans | The decoder's checks |
-| Pair fit | A poor fit | RMS 15 mm or less over at least 8000 matched flat points |
+| Pair fit | A poor fit | RMS 15 mm or less over at least 2000 matched flat points (two indoor stations either side of a doorway share little). Pairs weigh in the global fit by their matches |
 | Held firmly | A fit that can slide (a lone wall, a fence, a corridor) or turn | The weakest direction of the fit's information must carry at least 1% of the matches (a turn counted at a 10 m arm); otherwise the pair is "weakly held" and the reason names the direction |
 | Unique | Symmetric or repeated walls | Every coarse guess is refined; a different fit with 80% of the best one's matches is a rival. Free space decides between rivals (one that puts 3% or more of its points where the other station saw straight through, three times the other's, loses); if it can't, the pair is "ambiguous" and is not used |
 | Loops | A wrong pair among right ones | The robust global fit; a pair it leaves more than 10 cm or 0.3° from its own fit is an outlier |
-| Independent | A placement the pairs agree on but the data doesn’t | Against every neighbour it overlaps, under the final poses, it disagrees when a fresh fit moves it more than 20 mm or 0.08°, when more than 5% of its wall points lie where the other saw straight through, when same-facing surfaces sit more than 20 mm apart (median), or when the ground under its tripod is more than 10 cm off. Each check votes among the neighbours it has evidence for |
+| Independent | A placement the pairs agree on but the data doesn’t | Against every neighbour it overlaps, under the final poses, it disagrees when a fresh fit with at least 8000 matches moves it more than 15 mm or 0.08°, when more than 5% of its wall points lie where the other saw straight through, when same-facing surfaces sit more than 20 mm apart (median), or when the ground under its tripod is more than 10 cm off. Each check votes among the neighbours it has evidence for |
 | Verdict | | `confirmed`: tied by two or more pairs that count, no check against it; `single`: one tie; `frame`: the only station; `doubtful`: a check finds it off against more than half its neighbours; `ambiguous`: only rival fits; `unplaced` |
 
 Only `confirmed`, `single` and `frame` stations count towards wall coverage;

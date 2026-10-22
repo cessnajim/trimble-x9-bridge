@@ -38,6 +38,12 @@ const HYPOTHESES: usize = 5;
 const ICP_SAMPLE: usize = 40_000;
 pub const GOOD_RMS_M: f64 = 0.015;
 pub const GOOD_MATCHES: usize = 8000;
+/// A pair may be used from this many matches when it is held firmly and
+/// unique: indoors, two stations either side of a doorway share little
+/// (2913 matches, fitting within 1 mm by every independent check). Pairs
+/// count in the global fit by their matches, and only fits with
+/// `GOOD_MATCHES` count as evidence against a station in the audit.
+pub const PAIR_MIN_MATCHES: usize = 2000;
 /// A pair the global fit leaves further off than this is an outlier.
 const OUTLIER_M: f64 = 0.10;
 const OUTLIER_DEG: f64 = 0.3;
@@ -62,7 +68,7 @@ const FREE_SPACE_RIVAL: f64 = 0.03;
 const SURFACE_BAD_MM: f64 = 20.0;
 /// A re-fit against a neighbour, from the final poses, may move a station
 /// this much before it disagrees (pairs that count are left within 10 mm).
-const REFIT_BAD_MM: f64 = 20.0;
+const REFIT_BAD_MM: f64 = 15.0;
 const REFIT_BAD_DEG: f64 = 0.08;
 /// Coarse: on grass a far station reads the ground a few centimetres high.
 const GROUND_BAD_M: f64 = 0.10;
@@ -849,7 +855,12 @@ pub fn pair_from(a_id: &str, a: &Prepared, b_id: &str, b: &Prepared, guess: [f64
 }
 
 fn fits(f: &Fit) -> bool {
-    f.rms <= GOOD_RMS_M && f.matches >= GOOD_MATCHES
+    f.rms <= GOOD_RMS_M && f.matches >= PAIR_MIN_MATCHES
+}
+
+/// A fit strong enough to count as evidence in the audit.
+fn firm(f: &Fit) -> bool {
+    f.rms <= GOOD_RMS_M && f.matches >= GOOD_MATCHES && weakest(f).0 >= CONSTRAINT_MIN
 }
 
 fn distinct(x: &Fit, y: &Fit) -> bool {
@@ -895,8 +906,8 @@ fn judge_pair(a_id: &str, a: &Prepared, b_id: &str, b: &Prepared, mut tried: Vec
     let (constraint, weak) = weakest(&f);
     let rejected = if f.rms > GOOD_RMS_M {
         Some(format!("fit {:.0} mm (needs {:.0} or less)", f.rms * 1000.0, GOOD_RMS_M * 1000.0))
-    } else if f.matches < GOOD_MATCHES {
-        Some(format!("{} matched points (needs {GOOD_MATCHES})", f.matches))
+    } else if f.matches < PAIR_MIN_MATCHES {
+        Some(format!("{} matched points (needs {PAIR_MIN_MATCHES})", f.matches))
     } else if constraint < CONSTRAINT_MIN {
         Some(format!("weakly held: {weak}"))
     } else if ambiguous {
@@ -1092,8 +1103,9 @@ impl Pose {
 /// that gives a predicted pose, and the other placed stations within reach
 /// are matched from the prediction (ICP only, no search). `say` hears progress.
 pub fn register_all(ids: &[String], prep: &[&Prepared], mut pairs: Vec<Pair>, say: &dyn Fn(usize, usize)) -> (Vec<Pair>, Vec<Option<Pose>>) {
-    // Pairs matched before the checks existed (constraint 0) are matched again.
-    pairs.retain(|p| ids.contains(&p.a) && ids.contains(&p.b) && !(p.good && p.constraint == 0.0));
+    // Pairs judged under older rules are matched again: those from before the
+    // checks existed (constraint 0), and rejections today's rules would accept.
+    pairs.retain(|p| ids.contains(&p.a) && ids.contains(&p.b) && !(p.good && p.constraint == 0.0) && !stale_rejection(p));
     let mut poses = solve(ids, &mut pairs);
     let n = ids.len();
     for b in 1..n {
@@ -1134,6 +1146,17 @@ pub fn register_all(ids: &[String], prep: &[&Prepared], mut pairs: Vec<Pair>, sa
         poses = solve(ids, &mut pairs);
     }
     (pairs, poses)
+}
+
+/// A pair rejected only for a bar that has since been lowered: it fitted, was
+/// held firmly and unique, but had fewer matches than the old bar asked.
+fn stale_rejection(p: &Pair) -> bool {
+    !p.good
+        && !p.ambiguous
+        && p.weak.is_none()
+        && p.constraint >= CONSTRAINT_MIN
+        && p.rms_mm.is_some_and(|r| r <= GOOD_RMS_M * 1000.0)
+        && p.matches >= PAIR_MIN_MATCHES
 }
 
 // ------------------------------------------------------------------- audit ---
@@ -1213,7 +1236,7 @@ pub fn audit(ids: &[String], names: &[String], prep: &[&Prepared], poses: &[Opti
         let (i, j) = jobs[todo[t]];
         let rel = rel_of(i, j);
         // Only a fit that is good and firmly held is evidence.
-        let refit = icp(prep[i], prep[j], rel[0], [rel[1], rel[2], rel[3]]).filter(|f| fits(f) && weakest(f).0 >= CONSTRAINT_MIN).map(|f| {
+        let refit = icp(prep[i], prep[j], rel[0], [rel[1], rel[2], rel[3]]).filter(firm).map(|f| {
             let mm = ((f.x[1] - rel[1]).powi(2) + (f.x[2] - rel[2]).powi(2) + (f.x[3] - rel[3]).powi(2)).sqrt() * 1000.0;
             [(mm * 10.0).round() / 10.0, (wrap(f.x[0] - rel[0]).to_degrees().abs() * 1000.0).round() / 1000.0]
         });
@@ -1982,6 +2005,21 @@ mod tests {
         assert_eq!(v["covered"], true);
         assert_eq!(v["stations"][0]["scan_id"], "scan-1");
         assert_eq!(v["unseen"][0]["to"], json!([10.0, 5.0]));
+    }
+
+    #[test]
+    fn rejections_under_an_old_bar_are_matched_again() {
+        let old = Pair {
+            a: "1".into(), b: "2".into(), turn_deg: 116.773, shift_m: [-3.188, 2.204, -0.007], rms_mm: Some(7.4), matches: 2913,
+            overlap: 0.18, coarse_score: 0.426, good: false, constraint: 0.0124, weak: None, ambiguous: false, resolved_by: None,
+            rejected: Some("2913 matched points (needs 8000)".into()), left_mm: None, left_deg: None, outlier: false,
+        };
+        assert!(stale_rejection(&old));
+        assert!(!stale_rejection(&Pair { matches: 1500, ..old.clone() }));
+        assert!(!stale_rejection(&Pair { rms_mm: Some(21.0), ..old.clone() }));
+        assert!(!stale_rejection(&Pair { ambiguous: true, ..old.clone() }));
+        assert!(!stale_rejection(&Pair { weak: Some("it can slide".into()), constraint: 0.002, ..old.clone() }));
+        assert!(!stale_rejection(&Pair { good: true, ..old }));
     }
 
     #[test]
