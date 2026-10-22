@@ -55,6 +55,7 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/v1/projects/:project_id/registration", get(get_registration).post(post_registration))
         .route("/v1/projects/:project_id/registration/plan", get(get_registration_plan))
         .route("/v1/projects/:project_id/registration/face", post(post_face))
+        .route("/v1/projects/:project_id/minimap", get(get_minimap))
         .route("/v1/workers", get(list_workers))
         .route("/v1/work/claim", post(work_claim))
         .route("/v1/work/:job_id/progress", post(work_progress))
@@ -685,26 +686,7 @@ async fn get_registration_plan(State(st): St, h: HeaderMap, Path(project_id): Pa
     st.caller(&h)?;
     let reg = st.inner.lock().unwrap().registrations.get(&project_id).cloned().ok_or_else(|| ApiError::not_found("registration"))?;
     let merged = st.merged(&project_id).ok_or_else(|| ApiError::not_found("registration"))?;
-    let faces: Vec<(String, crate::register::Face, [u8; 3])> = st
-        .inner
-        .lock()
-        .unwrap()
-        .missions
-        .get(&project_id)
-        .map(|m| {
-            m.targets
-                .iter()
-                .filter_map(|t| {
-                    let col = match t.status {
-                        crate::mission::Status::Open => [248, 113, 113],
-                        crate::mission::Status::Declined => [148, 163, 184],
-                        _ => [74, 222, 128],
-                    };
-                    Some((t.target_id.clone(), t.face?, col))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let faces = mission_faces(&st, &project_id);
     let png = tokio::task::spawn_blocking(move || {
         let stations: Vec<(u16, crate::register::Pose, bool)> =
             reg.stations.iter().filter_map(|s| Some((s.station, s.pose?, s.audit.as_ref().is_none_or(crate::register::Audit::trusted)))).collect();
@@ -723,6 +705,60 @@ struct FaceReq {
     from: Option<[f64; 2]>,
     #[serde(default)]
     to: Option<[f64; 2]>,
+}
+
+/// The mission's wall targets: id, face, colour by status.
+fn mission_faces(st: &AppState, project_id: &str) -> Vec<(String, crate::register::Face, [u8; 3])> {
+    st.inner
+        .lock()
+        .unwrap()
+        .missions
+        .get(project_id)
+        .map(|m| {
+            m.targets
+                .iter()
+                .filter_map(|t| {
+                    let col = match t.status {
+                        crate::mission::Status::Open => [248, 113, 113],
+                        crate::mission::Status::Declined => [148, 163, 184],
+                        _ => [74, 222, 128],
+                    };
+                    Some((t.target_id.clone(), t.face?, col))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[derive(Deserialize)]
+struct MinimapQuery {
+    #[serde(default)]
+    format: Option<String>,
+}
+
+/// The project as a plain line map (see `minimap`): SVG with
+/// `?format=svg`, PNG otherwise. Always drawn, even before any station.
+async fn get_minimap(State(st): St, h: HeaderMap, Path(project_id): Path<String>, Query(q): Query<MinimapQuery>) -> ApiResult<Response> {
+    st.caller(&h)?;
+    let (reg, registering) = {
+        let inner = st.inner.lock().unwrap();
+        (inner.registrations.get(&project_id).cloned(), inner.registering.contains_key(&project_id))
+    };
+    // Full domes the registration doesn't hold yet: just scanned.
+    let mut waiting: Vec<u16> = all_scans(&st)
+        .await?
+        .into_iter()
+        .filter(|s| s["project_id"] == project_id.as_str() && s["kind"] == "full_dome")
+        .filter(|s| reg.as_ref().is_none_or(|r| !r.stations.iter().any(|x| s["scan_id"] == x.scan_id.as_str())))
+        .filter_map(|s| s["station"].as_u64().map(|n| n as u16))
+        .collect();
+    waiting.sort();
+    let map = crate::minimap::Minimap::new(reg.as_ref(), mission_faces(&st, &project_id), &waiting, registering);
+    if q.format.as_deref() == Some("svg") {
+        return Ok(([(header::CONTENT_TYPE, "image/svg+xml")], map.svg()).into_response());
+    }
+    let png = tokio::task::spawn_blocking(move || map.png()).await.map_err(|e| ApiError::cache(format!("drawing: {e}")))?;
+    Ok(([(header::CONTENT_TYPE, "image/png")], png).into_response())
 }
 
 /// How much of a wall face the registered stations saw (changes nothing).

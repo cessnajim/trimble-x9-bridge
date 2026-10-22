@@ -218,6 +218,7 @@ input:focus, select:focus, textarea:focus, .btn:focus-visible, a:focus-visible {
 .grantbox { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .grantbox .line + .btn, .grantbox .meta + .btn { margin-top: 10px; }
 .review { margin: 10px 0; }
+img.minimap { display: block; width: 100%; height: auto; border-radius: 10px; background: #111827; margin-bottom: 8px; }
 img.nextstation { display: block; width: 100%; height: auto; border-radius: 10px; margin-top: 8px; background: #000; }
 .ns-note { margin: 8px 0 0; font-size: 15px; }
 .ledger { list-style: none; margin: 10px 0 0; padding: 0; }

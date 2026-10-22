@@ -362,6 +362,10 @@ try:
     check("the bridge registers the project's full domes after each scan", reg.get("updated_at") and not reg["registering_job_id"], reg)
     s, b = call("POST", f"/projects/{pid}/registration", "viewer")
     check("viewer can't start a registration (403)", s == 403, b)
+    s, ctype, png = fetch(f"/projects/{pid}/minimap", "viewer")
+    s2, ctype2, svg = fetch(f"/projects/{pid}/minimap?format=svg", "viewer")
+    check("the minimap is drawn, as PNG and as SVG", s == 200 and ctype == "image/png" and png[1:4] == b"PNG"
+          and s2 == 200 and ctype2.startswith("image/svg") and svg.startswith(b"<svg") and b"</svg>" in svg, (s, ctype, s2, ctype2))
     if FIX:
         check("every full dome is placed in one frame, with walls", len(reg["stations"]) == len(domes) >= 1
               and all(x["placed"] for x in reg["stations"]) and reg["walls"] and saw("registration"), reg["summary"])

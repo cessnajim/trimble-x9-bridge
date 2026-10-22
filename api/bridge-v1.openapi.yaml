@@ -473,6 +473,24 @@ paths:
         "202": { description: "The registration job (the running one, if any; it then runs once more).", content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
         default: { $ref: "#/components/responses/Problem" }
 
+  /projects/{project_id}/minimap:
+    parameters:
+      - { name: project_id, in: path, required: true, schema: { type: string } }
+      - { name: format, in: query, required: false, schema: { type: string, enum: [png, svg], default: png } }
+    get:
+      tags: [projects]
+      operationId: getMinimap
+      summary: "The job so far as a line map: walls, numbered stations (amber when not trusted), wall targets; stations not placed listed under it."
+      responses:
+        "200":
+          description: PNG, or SVG with format=svg.
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+            image/svg+xml:
+              schema: { type: string }
+        default: { $ref: "#/components/responses/Problem" }
+
   /projects/{project_id}/registration/plan:
     parameters:
       - { name: project_id, in: path, required: true, schema: { type: string } }

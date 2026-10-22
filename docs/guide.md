@@ -941,6 +941,19 @@ registration on scan files offline, with timings.
 Mission targets on walls use it: give a facade target a `wall_id` (or a
 `face`) and the bridge judges it (below).
 
+#### The minimap
+
+`GET /v1/projects/{id}/minimap` draws the job so far as a plain line map:
+walls as lines, stations as numbered dots with a tick for the way each
+scanner faced (amber with "?" while not trusted), and the mission's wall
+targets in their status colours (green covered, red open, grey declined) on a
+1 m or 5 m grid. Stations scanned but not yet placed, or still registering,
+are listed under it. PNG by default, `?format=svg` for a crisp, small
+drawing. It is drawn from the registration on every request, so it is
+current after each station; the web UI shows it at the top of Now and
+redraws it as stations land and register, and the agent shows it in the chat
+(`scanner_minimap`).
+
 #### Workers: registration on a faster computer
 
 The Pi registers on its own, keeping prepared stations and pair checks in

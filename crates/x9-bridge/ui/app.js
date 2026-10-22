@@ -54,6 +54,8 @@ const S = {
   nsImages: new Map(), // scan_id|at -> object URL | "loading" | {error}
   regs: {},            // project_id -> registration (null while loading)
   regImages: new Map(), // project|updated|ledger -> object URL | "loading" | {error}
+  mapImages: new Map(), // project|registration|stations|ledger -> object URL | "loading" | {error}
+  mapLast: {},          // project -> the last minimap drawn, shown while the next one loads
   evidence: new Map(), // measurement_id -> object URL | "loading" | {error}
   watchMeasure: {}, // scan_id -> job_id
   watchExport: {}, // scan_id -> job_id
@@ -101,6 +103,7 @@ function stateChip(state) {
 
 function describeJob(j) {
   if (j.kind === "measure") return "Opening measurement";
+  if (j.kind === "register") return "Registering stations";
   if (j.kind === "export") return `Export${j.result?.export_id && S.exports[j.result.export_id] ? " " + S.exports[j.result.export_id].format?.toUpperCase() : ""}`;
   const r = j.request;
   if (!r) return "Scan";
@@ -309,6 +312,34 @@ function regPlan(m) {
     : img?.error ? `<div class="problem">${esc(img.error)}</div>`
     : `<a href="${esc(img)}" target="_blank" rel="noopener" title="Open full size"><img class="nextstation" src="${esc(img)}" alt="Plan of the registered stations, walls and the mission's wall faces"></a>`;
   return `<div class="meta">${esc(r.summary)}</div>${pic}`;
+}
+
+// The project as a line map (walls, stations), redrawn as stations land and register.
+function minimapCard(pid) {
+  if (!(pid in S.regs)) {
+    S.regs[pid] = null;
+    api(`/projects/${encodeURIComponent(pid)}/registration`).then((v) => { S.regs[pid] = v; }).catch(() => {}).finally(() => render());
+  }
+  const r = S.regs[pid];
+  const registering = S.jobs.filter((j) => j.kind === "register" && (j.state === "running" || j.state === "queued"));
+  const domes = S.scans.filter((s) => s.project_id === pid && s.kind === "full_dome").length;
+  const m = S.missions.find((x) => x.project_id === pid);
+  const key = `${pid}|${r?.updated_at ?? ""}|${registering.length}|${domes}|${m ? m.targets.map((t) => t.status).join() : ""}`;
+  let img = S.mapImages.get(key);
+  if (!img) {
+    S.mapImages.set(key, "loading");
+    api(`/projects/${encodeURIComponent(pid)}/minimap?format=svg`, { raw: true })
+      .then((x) => x.blob())
+      .then((b) => { const u = URL.createObjectURL(b); S.mapImages.set(key, u); S.mapLast[pid] = u; })
+      .catch((e) => S.mapImages.set(key, { error: e.message }))
+      .finally(() => render());
+    img = "loading";
+  }
+  const shown = typeof img === "string" && img !== "loading" ? img : S.mapLast[pid];
+  const pic = shown ? `<a href="${esc(shown)}" target="_blank" rel="noopener" title="Open full size"><img class="minimap" src="${esc(shown)}" alt="Line map of the walls found and the stations so far"></a>`
+    : img?.error ? `<div class="problem">${esc(img.error)}</div>` : `<div class="placeholder small">Drawing the map…</div>`;
+  const phase = registering[0]?.phase;
+  return `<div class="card">${pic}<div class="meta">${registering.length ? `Registering${phase ? `: ${esc(phase)}` : "…"}` : esc(r?.summary ?? "The map fills in as stations are scanned.")}</div></div>`;
 }
 
 // The agent's proposal for where to set up next: the picture and its directions.
@@ -602,9 +633,10 @@ function viewNow() {
     <h2>Now</h2><section>${active.length ? active.map((j) => jobCard(j)).join("") : `<p class="empty">Nothing running.</p>`}
       ${canAct() ? `<button class="btn primary wide" data-act="sheet-scan">New full-dome scan</button>` : ""}</section>
     </div><div>
-    ${(() => { const m = S.missions.find((x) => x.project_id === S.project) ?? S.missions[0]; return m ? `<h2 class="first">Mission</h2><section>${missionCard(m)}</section>` : ""; })()}
-    ${(() => { const p = S.nextStations.find((x) => !S.project || x.project_id === S.project) ?? S.nextStations[0]; return p ? `<h2 class="${S.missions.length ? "" : "first"}">Next station</h2><section>${nextStationCard(p)}</section>` : ""; })()}
-    <h2 class="${S.nextStations.length || S.missions.length ? "" : "first"}">Needs you</h2><section>${needs.length ? needs.join("") : `<p class="empty">Nothing needs you.</p>`}</section>
+    ${S.project ? `<h2 class="first">Map</h2><section>${minimapCard(S.project)}</section>` : ""}
+    ${(() => { const m = S.missions.find((x) => x.project_id === S.project) ?? S.missions[0]; return m ? `<h2 class="${S.project ? "" : "first"}">Mission</h2><section>${missionCard(m)}</section>` : ""; })()}
+    ${(() => { const p = S.nextStations.find((x) => !S.project || x.project_id === S.project) ?? S.nextStations[0]; return p ? `<h2 class="${S.missions.length || S.project ? "" : "first"}">Next station</h2><section>${nextStationCard(p)}</section>` : ""; })()}
+    <h2 class="${S.nextStations.length || S.missions.length || S.project ? "" : "first"}">Needs you</h2><section>${needs.length ? needs.join("") : `<p class="empty">Nothing needs you.</p>`}</section>
     ${recent.length ? `<h2>Recent</h2><section>${recent.map((j) => jobCard(j, { actions: false })).join("")}</section>` : ""}
     </div></div>`;
 }

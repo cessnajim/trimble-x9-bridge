@@ -17,6 +17,7 @@ mod export;
 mod files;
 mod map;
 mod measure;
+mod minimap;
 mod mission;
 mod model;
 mod problem;
