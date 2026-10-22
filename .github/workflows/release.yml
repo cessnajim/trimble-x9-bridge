@@ -6,32 +6,45 @@ permissions:
   contents: write
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+        include:
+          # The Pi and Linux machines.
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest }
+          # Field laptops, for `x9-bridge worker`.
+          - { target: aarch64-apple-darwin, os: macos-14 }
+          - { target: x86_64-apple-darwin, os: macos-14 }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      # Built against glibc 2.36 (Debian 12 and newer, Raspberry Pi OS),
-      # whatever the runner's own glibc is.
+      # Linux builds target glibc 2.36 (Debian 12 and newer, Raspberry Pi
+      # OS), whatever the runner's own glibc is.
       - uses: actions/setup-python@v5
+        if: runner.os == 'Linux'
         with:
           python-version: "3.12"
       - name: Install zig and cargo-zigbuild
+        if: runner.os == 'Linux'
         run: pip install ziglang cargo-zigbuild
-      - name: Build
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
         run: cargo zigbuild --release --locked --target ${{ matrix.target }}.2.36 -p x9-bridge -p x9-mock -p x9-cli
       - name: Check the glibc floor
+        if: runner.os == 'Linux'
         run: |
           for b in x9-bridge x9-mock x9; do
             need=$(readelf -V target/${{ matrix.target }}/release/$b | grep -o 'GLIBC_2\.[0-9]*' | sort -V | tail -1)
             echo "$b needs $need"
             [ "$(printf '%s\nGLIBC_2.36\n' "$need" | sort -V | tail -1)" = GLIBC_2.36 ] || { echo "$b needs a glibc newer than 2.36"; exit 1; }
           done
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: cargo build --release --locked --target ${{ matrix.target }} -p x9-bridge -p x9-mock -p x9-cli
       - name: Package
         run: |
           d=trimble-x9-bridge-${{ github.ref_name }}-${{ matrix.target }}
@@ -40,7 +53,7 @@ jobs:
           cp ops/x9-netctl ops/90-x9-bridge ops/x9-bridge-run ops/x9-bridge.service ops/x9-wifi-prefer ops/x9-wifi-prefer.service ops/x9-wifi-prefer.timer ops/README.md $d/ops/
           cp -r README.md PROVENANCE.md LICENSE NOTICE docs $d/
           tar -czf $d.tar.gz $d
-          sha256sum $d.tar.gz > $d.tar.gz.sha256
+          shasum -a 256 $d.tar.gz > $d.tar.gz.sha256
       - uses: softprops/action-gh-release@v2
         with:
           files: |

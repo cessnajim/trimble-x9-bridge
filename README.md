@@ -33,7 +33,9 @@ trademarks of their respective owners.
   into the project frame by itself (4-DOF: the X9 levels its scans), adjusts
   all stations together so loops close, finds the walls in the merged plan,
   and judges how much of any wall face has been seen. Mission targets on
-  walls are then covered by geometry, not by eye.
+  walls are then covered by geometry, not by eye. Every station gets a
+  verdict from independent checks; a field laptop can do the work for the
+  Pi (`x9-bridge worker`), with the Pi as the fallback.
 - **Next-station proposals:** the agent marks where to set up next on the
   station's preview (a tripod on the ground, labels for what was seen and
   what is hidden, landmarks to walk by) with directions in prose; the bridge

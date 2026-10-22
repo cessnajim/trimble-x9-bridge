@@ -117,6 +117,12 @@ pub struct AppState {
     pub recipes_dir: std::path::PathBuf,
     /// Viewer and coverage builds run one at a time (each decodes a whole scan).
     pub view_lock: tokio::sync::Mutex<()>,
+    /// Workers on other computers and the registration jobs offered to them.
+    pub work: Mutex<crate::work::WorkState>,
+    /// Prepared stations, by scan id, so a registration redoes only what's new.
+    pub prepared: Mutex<HashMap<String, std::sync::Arc<crate::register::Prepared>>>,
+    /// Pair checks already made (see `register::audit`).
+    pub audit_cache: Mutex<crate::register::AuditCache>,
 }
 
 impl AppState {
@@ -134,6 +140,9 @@ impl AppState {
             data_dir,
             recipes_dir,
             view_lock: tokio::sync::Mutex::new(()),
+            work: Mutex::new(Default::default()),
+            prepared: Mutex::new(HashMap::new()),
+            audit_cache: Mutex::new(HashMap::new()),
         }
     }
 

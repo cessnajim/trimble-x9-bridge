@@ -55,6 +55,12 @@ pub fn router(st: Arc<AppState>) -> Router {
         .route("/v1/projects/:project_id/registration", get(get_registration).post(post_registration))
         .route("/v1/projects/:project_id/registration/plan", get(get_registration_plan))
         .route("/v1/projects/:project_id/registration/face", post(post_face))
+        .route("/v1/workers", get(list_workers))
+        .route("/v1/work/claim", post(work_claim))
+        .route("/v1/work/:job_id/progress", post(work_progress))
+        .route("/v1/work/:job_id/merged", axum::routing::put(work_merged).layer(axum::extract::DefaultBodyLimit::max(1 << 29)))
+        .route("/v1/work/:job_id/result", post(work_result).layer(axum::extract::DefaultBodyLimit::max(1 << 26)))
+        .route("/v1/work/:job_id/fail", post(work_fail))
         .route("/v1/projects/:project_id/mission", get(get_mission).put(put_mission))
         .route("/v1/projects/:project_id/mission/targets", post(update_targets))
         .route("/v1/projects/:project_id/mission/ready", post(mission_ready))
@@ -732,6 +738,83 @@ async fn post_face(State(st): St, h: HeaderMap, Path(project_id): Path<String>, 
     let mut v = geo.judge(&face).ok_or_else(|| ApiError::conflict("the project is not registered yet"))?;
     v["face"] = json!(face);
     Ok(Json(v))
+}
+
+/// Workers seen in the last 15 s (see `work`).
+async fn list_workers(State(st): St, h: HeaderMap) -> ApiResult<Json<Value>> {
+    st.caller(&h)?;
+    Ok(Json(json!(st.work.lock().unwrap().workers())))
+}
+
+#[derive(Deserialize)]
+struct ClaimReq {
+    worker: String,
+}
+
+/// A worker asks for work: 200 with a job, or 204.
+async fn work_claim(State(st): St, h: HeaderMap, body: Bytes) -> ApiResult<Response> {
+    let c = st.require(&h, |r| r != Role::Viewer, "do work for the bridge")?;
+    let req: ClaimReq = parse(&body)?;
+    let w = req.worker.trim();
+    if w.is_empty() || w.len() > 64 || !w.chars().all(|ch| ch.is_ascii_alphanumeric() || "-_.".contains(ch)) {
+        return Err(ApiError::invalid("worker: 1–64 letters, digits, '-', '_' or '.'"));
+    }
+    let job = st.work.lock().unwrap().claim(w, &c.name);
+    match job {
+        None => Ok(StatusCode::NO_CONTENT.into_response()),
+        Some(v) => {
+            let project = v["project_id"].as_str().map(str::to_string);
+            st.log("note", format!("Worker {w} took the registration job"), &c.name, project.as_deref(), &[("job_id", v["job_id"].as_str().unwrap_or(""))]);
+            Ok(Json(v).into_response())
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ProgressReq {
+    phase: String,
+    #[serde(default)]
+    progress: Option<f64>,
+}
+
+async fn work_progress(State(st): St, h: HeaderMap, Path(job_id): Path<String>, body: Bytes) -> ApiResult<StatusCode> {
+    let c = st.require(&h, |r| r != Role::Viewer, "do work for the bridge")?;
+    let req: ProgressReq = parse(&body)?;
+    st.work.lock().unwrap().holds(&job_id, &c.name).map_err(ApiError::conflict)?;
+    let phase: String = req.phase.chars().take(120).collect();
+    crate::worker::set_phase(&st, &job_id, &phase, req.progress.map(|p| p.clamp(0.0, 1.0)));
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn work_merged(State(st): St, h: HeaderMap, Path(job_id): Path<String>, body: Bytes) -> ApiResult<StatusCode> {
+    let c = st.require(&h, |r| r != Role::Viewer, "do work for the bridge")?;
+    let bytes = body.to_vec();
+    let checked = tokio::task::spawn_blocking(move || crate::register::Merged::from_bytes(&bytes).map(|_| bytes))
+        .await
+        .map_err(|e| ApiError::conflict(e.to_string()))?
+        .map_err(ApiError::invalid)?;
+    st.work.lock().unwrap().put_merged(&job_id, &c.name, checked).map_err(ApiError::conflict)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn work_result(State(st): St, h: HeaderMap, Path(job_id): Path<String>, body: Bytes) -> ApiResult<StatusCode> {
+    let c = st.require(&h, |r| r != Role::Viewer, "do work for the bridge")?;
+    let res: crate::work::WorkResult = parse(&body)?;
+    st.work.lock().unwrap().deliver(&job_id, &c.name, Ok(res)).map_err(ApiError::conflict)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct FailReq {
+    error: String,
+}
+
+async fn work_fail(State(st): St, h: HeaderMap, Path(job_id): Path<String>, body: Bytes) -> ApiResult<StatusCode> {
+    let c = st.require(&h, |r| r != Role::Viewer, "do work for the bridge")?;
+    let req: FailReq = parse(&body)?;
+    let why: String = req.error.chars().take(300).collect();
+    st.work.lock().unwrap().deliver(&job_id, &c.name, Err(why)).map_err(ApiError::conflict)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn default_margin() -> f64 {

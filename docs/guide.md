@@ -941,6 +941,35 @@ registration on scan files offline, with timings.
 Mission targets on walls use it: give a facade target a `wall_id` (or a
 `face`) and the bridge judges it (below).
 
+#### Workers: registration on a faster computer
+
+The Pi registers on its own, keeping prepared stations and pair checks in
+memory so each new station costs about one station's work. A faster
+computer, typically the field laptop on the USB-C cable, can take that work
+off it:
+
+```bash
+x9-bridge worker --bridge http://10.55.0.1:8795      # token: ~/.config/x9-worker/token or X9_WORKER_TOKEN
+```
+
+The worker claims registration jobs (`POST /v1/work/claim`), fetches the
+scans over the bridge, decodes, registers and audits them on its own cores,
+uploads the merged points and posts the result. The bridge stays the record:
+it stores the result, logs it ("registered on <worker>") and re-judges the
+mission as when it works alone. It takes the job back when no worker has
+been seen for 15 s, none claims within 10 s, or the worker fails or takes
+longer than 10 minutes. `GET /v1/workers` lists the workers seen recently. The
+release has macOS builds for laptops; the agent asks the person once per
+laptop whether to use it (`scanner_processing`).
+
+| Route | Who | What |
+| --- | --- | --- |
+| `POST /v1/work/claim` `{worker}` | agent, operator | 200 with a job (`job_id`, `project_id`, `stations`, `pairs` already matched), or 204 |
+| `POST /v1/work/{job}/progress` `{phase, progress}` | the claimer | Shown on the job |
+| `PUT /v1/work/{job}/merged` | the claimer | The merged points (binary, as the bridge stores them) |
+| `POST /v1/work/{job}/result` | the claimer | `{pairs, poses, audits, walls, skipped}`, poses and audits in the offered stations' order less the skipped |
+| `POST /v1/work/{job}/fail` `{error}` | the claimer | The bridge registers it itself |
+
 ### Propose the next station
 
 After checking a station's coverage, the agent shows the person where to set

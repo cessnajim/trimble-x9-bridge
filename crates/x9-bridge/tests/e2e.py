@@ -375,6 +375,30 @@ try:
         s, b = call("POST", f"/projects/{pid}/registration/face", "viewer", {"wall_id": "w999"})
         check("an unknown wall is refused (400)", s == 400, b)
         check("registrations are saved for a restart", os.path.exists(os.path.join(tmp, "data", "registrations.json")))
+    # Workers: a faster computer can take registration; the bridge takes it back.
+    s, _ = call("POST", "/work/claim", "viewer", {"worker": "e2e-laptop"})
+    check("viewer can't do work for the bridge (403)", s == 403, s)
+    s, _ = call("POST", "/work/claim", "agent", {"worker": "e2e-laptop"})
+    _, ws = call("GET", "/workers", "viewer")
+    check("an idle worker gets 204 and is listed", s == 204 and [w["worker"] for w in ws] == ["e2e-laptop"], (s, ws))
+    s, rj = call("POST", f"/projects/{pid}/registration", "agent")
+    job, deadline = None, time.time() + 15
+    while job is None and time.time() < deadline:
+        s, b = call("POST", "/work/claim", "agent", {"worker": "e2e-laptop"})
+        job = b if s == 200 else None
+        time.sleep(0.2)
+    check("the worker claims the registration job, with the stations and pairs", job and job["job_id"] == rj["job_id"]
+          and job["kind"] == "register" and isinstance(job["stations"], list) and isinstance(job["pairs"], list), job)
+    s, b = call("POST", f"/work/{rj['job_id']}/result", "agent2", {"pairs": [], "poses": [], "audits": [], "walls": []})
+    check("only the claimer may post the result (409)", s == 409 and "not claimed" in b["detail"], b)
+    s, _ = call("POST", f"/work/{rj['job_id']}/progress", "agent", {"phase": "decoding on e2e-laptop", "progress": 0.2})
+    _, jb = call("GET", f"/jobs/{rj['job_id']}", "viewer")
+    check("the worker's progress shows on the job", s == 204 and jb["phase"] == "decoding on e2e-laptop", jb)
+    s, _ = call("POST", f"/work/{rj['job_id']}/fail", "agent", {"error": "laptop lid closed"})
+    jb = wait_job(rj["job_id"], ("succeeded", "failed"), timeout=180)
+    _, log = call("GET", f"/log?project_id={pid}", "viewer")
+    check("a failed worker hands the job back and the bridge registers it", s == 204 and jb["state"] == "succeeded"
+          and any("came back to the bridge" in e["text"] and "laptop lid closed" in e["text"] for e in log), (jb["state"], [e["text"] for e in log][-3:]))
     # Missions: the goal, the ledger, ready to leave, one sign-off.
     s, b = call("PUT", f"/projects/{pid}/mission", "viewer", {"goal": "x", "kind": "exterior", "done_when": "y"})
     check("viewer can't set a mission (403)", s == 403, b)

@@ -333,6 +333,8 @@ fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
 /// A station ready for matching: 10 cm-thinned points, their normals and
 /// flatness, a kd-tree, and its wall slice (x, y).
 pub struct Prepared {
+    /// The scan's angular step (for point spacing).
+    pub step_rad: f32,
     pub pts: Vec<[f32; 3]>,
     pub range: Vec<f32>,
     pub normal: Vec<[f32; 3]>,
@@ -403,7 +405,7 @@ pub fn prepare(c: &Cloud) -> Prepared {
         let e = &mut depth[j * NAZ + i];
         *e = if *e == 0.0 { d } else { e.min(d) };
     }
-    Prepared { pts, range, normal, planar, wall, tree, slice, depth }
+    Prepared { step_rad: c.step_rad, pts, range, normal, planar, wall, tree, slice, depth }
 }
 
 /// How B sits in A: `B_in_A = R(turn) b + shift`.
@@ -1176,7 +1178,22 @@ impl Audit {
 /// neighbours it has evidence for; a station is doubtful when any check finds
 /// it off against more than half of those. `names` label stations in the
 /// reasons.
-pub fn audit(ids: &[String], names: &[String], prep: &[&Prepared], poses: &[Option<Pose>], pairs: &[Pair]) -> Vec<Audit> {
+/// One pair's independent checks (see `audit`): surface gaps (m), free
+/// space, ground gap (m), and the fresh fit's move (mm, °).
+#[derive(Clone, Default)]
+pub struct PairChecks {
+    gaps: Vec<f32>,
+    free_space: Option<f64>,
+    ground: Option<f64>,
+    refit: Option<[f64; 2]>,
+}
+
+/// Checks already made, by pair of scan ids, with the relative pose they
+/// were made at: reused while that pose stays put (within 1 mm and 0.001°),
+/// so a new station only checks what changed.
+pub type AuditCache = HashMap<(String, String), ([f64; 4], PairChecks)>;
+
+pub fn audit(ids: &[String], names: &[String], prep: &[&Prepared], poses: &[Option<Pose>], pairs: &[Pair], cache: &mut AuditCache) -> Vec<Audit> {
     let n = ids.len();
     let placed: Vec<usize> = (0..n).filter(|&k| poses[k].is_some()).collect();
     let near = |i: usize, j: usize| {
@@ -1184,10 +1201,17 @@ pub fn audit(ids: &[String], names: &[String], prep: &[&Prepared], poses: &[Opti
         (p.xyz_m[0] - q.xyz_m[0]).hypot(p.xyz_m[1] - q.xyz_m[1]) < 2.0 * RANGE as f64
     };
     let jobs: Vec<(usize, usize)> = placed.iter().flat_map(|&i| placed.iter().filter(move |&&j| j > i).map(move |&j| (i, j))).filter(|&(i, j)| near(i, j)).collect();
-    type Checks = (Vec<f32>, Option<f64>, Option<f64>, Option<[f64; 2]>);
-    let checks: Vec<Checks> = par_map(jobs.len(), |k| {
-        let (i, j) = jobs[k];
-        let rel = relative(poses[i].expect("placed").p4(), poses[j].expect("placed").p4());
+    let rel_of = |i: usize, j: usize| relative(poses[i].expect("placed").p4(), poses[j].expect("placed").p4());
+    let same = |x: &[f64; 4], y: &[f64; 4]| (x[0] - y[0]).abs() < 1e-3f64.to_radians() && (1..4).all(|k| (x[k] - y[k]).abs() < 1e-3);
+    let todo: Vec<usize> = (0..jobs.len())
+        .filter(|&k| {
+            let (i, j) = jobs[k];
+            cache.get(&(ids[i].clone(), ids[j].clone())).is_none_or(|(at, _)| !same(at, &rel_of(i, j)))
+        })
+        .collect();
+    let fresh: Vec<PairChecks> = par_map(todo.len(), |t| {
+        let (i, j) = jobs[todo[t]];
+        let rel = rel_of(i, j);
         // Only a fit that is good and firmly held is evidence.
         let refit = icp(prep[i], prep[j], rel[0], [rel[1], rel[2], rel[3]]).filter(|f| fits(f) && weakest(f).0 >= CONSTRAINT_MIN).map(|f| {
             let mm = ((f.x[1] - rel[1]).powi(2) + (f.x[2] - rel[2]).powi(2) + (f.x[3] - rel[3]).powi(2)).sqrt() * 1000.0;
@@ -1197,8 +1221,13 @@ pub fn audit(ids: &[String], names: &[String], prep: &[&Prepared], poses: &[Opti
         gaps.extend(surface_gaps(prep[j], prep[i], invert(rel)));
         let fs = [free_space(prep[i], prep[j], rel), free_space(prep[j], prep[i], invert(rel))].into_iter().flatten().reduce(f64::max);
         let gr = [ground_gap(prep[i], prep[j], rel), ground_gap(prep[j], prep[i], invert(rel))].into_iter().flatten().reduce(|x, y| if y.abs() > x.abs() { y } else { x });
-        (gaps, fs, gr, refit)
+        PairChecks { gaps, free_space: fs, ground: gr, refit }
     });
+    for (t, c) in todo.iter().zip(fresh) {
+        let (i, j) = jobs[*t];
+        cache.insert((ids[i].clone(), ids[j].clone()), (rel_of(i, j), c));
+    }
+    let checks: Vec<PairChecks> = jobs.iter().map(|&(i, j)| cache[&(ids[i].clone(), ids[j].clone())].1.clone()).collect();
     let pct = |v: &mut Vec<f32>| -> Option<[f64; 2]> {
         if v.len() < 300 {
             return None;
@@ -1234,7 +1263,7 @@ pub fn audit(ids: &[String], names: &[String], prep: &[&Prepared], poses: &[Opti
                     continue;
                 }
                 let other = &names[if i == k { j } else { i }];
-                let (g, fs, gr, refit) = &checks[q];
+                let PairChecks { gaps: g, free_space: fs, ground: gr, refit } = &checks[q];
                 let mut g = g.clone();
                 let mut vote = |c: usize, bad: bool, why: String| {
                     votes[c].0 += 1;
@@ -1415,7 +1444,8 @@ pub struct Merged {
 const MERGED_MAGIC: &[u8; 4] = b"X9M1";
 
 impl Merged {
-    pub fn add(&mut self, p: &Prepared, step_rad: f32, pose: &Pose, station: u16) {
+    pub fn add(&mut self, p: &Prepared, pose: &Pose, station: u16) {
+        let step_rad = p.step_rad;
         for i in 0..p.pts.len() {
             let w = pose.apply(p.pts[i]);
             self.plan.push([w[0], w[1]]);
@@ -1832,7 +1862,7 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
     }
     let t = std::time::Instant::now();
     let refs: Vec<&Prepared> = prep.iter().collect();
-    let audits = audit(&ids, &ids, &refs, &poses, &pairs);
+    let audits = audit(&ids, &ids, &refs, &poses, &pairs, &mut AuditCache::new());
     eprintln!("audit in {:.1} s", t.elapsed().as_secs_f64());
     for (k, a) in audits.iter().enumerate() {
         let off = truth.as_ref().and_then(|tr| Some((tr.get(k)?.as_ref()?, poses[k].as_ref()?))).map(|(t, p)| {
@@ -1847,7 +1877,7 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
     let mut stations = Vec::new();
     for (k, p) in poses.iter().enumerate() {
         if let Some(p) = p {
-            merged.add(&prep[k], clouds[k].step_rad, p, k as u16 + 1);
+            merged.add(&prep[k], p, k as u16 + 1);
             stations.push((k as u16 + 1, *p, audits[k].trusted()));
         }
     }
@@ -2056,7 +2086,8 @@ mod tests {
         let ids: Vec<String> = ["1", "2", "3"].iter().map(|s| s.to_string()).collect();
         let (pairs, poses) = register_all(&ids, &refs, vec![], &|_, _| {});
         assert!(poses.iter().all(Option::is_some), "{pairs:?}");
-        let verdicts = |poses: &[Option<Pose>]| audit(&ids, &ids, &refs, poses, &pairs).into_iter().map(|a| a.verdict).collect::<Vec<_>>();
+        let mut cache = AuditCache::new();
+        let mut verdicts = |poses: &[Option<Pose>]| audit(&ids, &ids, &refs, poses, &pairs, &mut cache).into_iter().map(|a| a.verdict).collect::<Vec<_>>();
         assert_eq!(verdicts(&poses), ["confirmed", "confirmed", "confirmed"]);
         let mut moved = poses.clone();
         moved[1].as_mut().unwrap().xyz_m[0] += 0.3;

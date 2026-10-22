@@ -82,7 +82,12 @@ fn finish(st: &AppState, job_id: &str, state: JobState, result: Option<serde_jso
     let (project_id, job_kind) = project_id.unzip();
     let job_kind = job_kind.unwrap_or_else(|| "scan".into());
     let kind = if state == JobState::Failed { "error" } else { job_kind.as_str() };
-    let label = if job_kind == "export" { "Export" } else { "Scan" };
+    let label = match job_kind.as_str() {
+        "export" => "Export",
+        "register" => "Registration",
+        "measure" | "measurement" => "Measurement",
+        _ => "Scan",
+    };
     st.log(kind, format!("{label} job {job_id} {verb}"), "bridge", project_id.as_deref(), &[("job_id", job_id)]);
 }
 
@@ -332,12 +337,12 @@ fn cancel_requested_locked(inner: &crate::state::Inner, job_id: &str) -> bool {
     inner.jobs.iter().find(|j| j.job.job_id == job_id).is_none_or(|j| j.cancel_requested)
 }
 
-/// One pass: decode stations not seen before into 5 cm clouds (kept on
-/// disk), place every station, merge, find walls, re-judge the mission's
-/// wall faces. `Err(None)`: cancelled.
+/// One pass: list the project's full domes; a connected worker registers
+/// them (see `work`), or the bridge does; then store the result, log what
+/// changed and re-judge the mission's wall faces. `Err(None)`: cancelled.
 async fn register_once(st: &Arc<AppState>, job_id: &str, project_id: &str) -> Result<serde_json::Value, Option<ApiError>> {
-    use crate::files::{scan_file, FileKind};
-    use crate::register::{audit, prepare, register_all, walls, Cloud, Merged, Prepared, Registration, StationPose};
+    use crate::register::{Merged, Registration, StationPose};
+    use crate::work::Offered;
     let mut stations: Vec<(u16, String)> = crate::routes::all_scans(st)
         .await
         .map_err(Some)?
@@ -346,90 +351,29 @@ async fn register_once(st: &Arc<AppState>, job_id: &str, project_id: &str) -> Re
         .filter_map(|s| Some((s["station"].as_u64()? as u16, s["scan_id"].as_str()?.to_string())))
         .collect();
     stations.sort();
-    let dir = st.data_dir.join("registration");
-    tokio::fs::create_dir_all(&dir).await.map_err(|e| Some(ApiError::cache(format!("registration directory: {e}"))))?;
-    let mut skipped: Vec<(u16, String)> = Vec::new();
-    let total = stations.len().max(1);
-    for (k, (n, id)) in stations.iter().enumerate() {
-        let path = dir.join(format!("{id}.cloud"));
-        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            continue;
-        }
-        if update(st, job_id, |r| {
-            r.job.phase = Some(format!("decoding station {n}"));
-            r.job.progress = Some(k as f64 / total as f64 * 0.4);
-        }) {
-            return Err(None);
-        }
-        let tzf = match unless_cancelled(st, job_id, scan_file(st, id, FileKind::Tzf)).await {
-            None => return Err(None),
-            Some(Ok(p)) => p,
-            Some(Err(e)) => {
-                skipped.push((*n, e.title.to_string()));
-                continue;
-            }
-        };
-        let res = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-            let t = trimble_tzf::Tzf::open(&tzf).map_err(|e| format!("open: {e}"))?;
-            let meta = t.scan_meta().map_err(|e| format!("metadata: {e}"))?;
-            let pts = t.grid_points().map_err(|e| format!("decode: {e}"))?;
-            Ok(Cloud::from_grid(&pts, crate::view::step_rad(&meta)).to_bytes())
-        })
-        .await;
-        match res {
-            Ok(Ok(bytes)) => {
-                let tmp = path.with_extension(format!("cloud.{}", crate::util::new_id("tmp")));
-                let w = tokio::fs::write(&tmp, &bytes).await.and(tokio::fs::rename(&tmp, &path).await);
-                if let Err(e) = w {
-                    let _ = tokio::fs::remove_file(&tmp).await;
-                    return Err(Some(ApiError::cache(format!("station cloud: {e}"))));
-                }
-            }
-            Ok(Err(e)) => skipped.push((*n, e)),
-            Err(e) => skipped.push((*n, e.to_string())),
-        }
-    }
-    stations.retain(|(n, _)| !skipped.iter().any(|s| s.0 == *n));
-    if update(st, job_id, |r| {
-        r.job.phase = Some("matching".into());
-        r.job.progress = Some(0.4);
-    }) {
-        return Err(None);
-    }
     let prev = st.inner.lock().unwrap().registrations.get(project_id).cloned();
-    let ids: Vec<String> = stations.iter().map(|s| s.1.clone()).collect();
-    let numbers: Vec<u16> = stations.iter().map(|s| s.0).collect();
     let pairs0 = prev.as_ref().map(|r| r.pairs.clone()).unwrap_or_default();
-    let (st2, job2, ids2, numbers2) = (st.clone(), job_id.to_string(), ids.clone(), numbers.clone());
-    let out = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let clouds: Vec<Cloud> = ids2
-            .iter()
-            .map(|id| std::fs::read(dir.join(format!("{id}.cloud"))).map_err(|e| format!("station cloud {id}: {e}")).and_then(|b| Cloud::from_bytes(&b)))
-            .collect::<Result<_, _>>()?;
-        let prep: Vec<Prepared> = clouds.iter().map(prepare).collect();
-        let refs: Vec<&Prepared> = prep.iter().collect();
-        let say = |b: usize, a: usize| {
-            update(&st2, &job2, |r| r.job.phase = Some(format!("matching station {} against {}", numbers2[b], numbers2[a])));
-        };
-        let (pairs, poses) = register_all(&ids2, &refs, pairs0, &say);
-        update(&st2, &job2, |r| r.job.phase = Some("checking".into()));
-        let names: Vec<String> = numbers2.iter().map(u16::to_string).collect();
-        let audits = audit(&ids2, &names, &refs, &poses, &pairs);
-        let mut merged = Merged::default();
-        for (k, p) in poses.iter().enumerate() {
-            if let Some(p) = p {
-                merged.add(&prep[k], clouds[k].step_rad, p, numbers2[k]);
-            }
-        }
-        let ws = walls(&merged);
-        Ok((pairs, poses, audits, merged, ws))
-    })
-    .await;
-    let (pairs, poses, audits, merged, ws) = match out {
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => return Err(Some(ApiError::cache(e))),
-        Err(e) => return Err(Some(ApiError::conflict(e.to_string()))),
+    let cancelled = || cancel_requested(st, job_id);
+    let phase = |p: String| {
+        update(st, job_id, |r| r.job.phase = Some(p));
     };
+    let offered = crate::work::offer(st, job_id, project_id, &stations, &pairs0, &cancelled, &phase).await;
+    let (skipped, pairs, poses, audits, merged, ws, by) = match offered {
+        Offered::Cancelled => return Err(None),
+        Offered::Done(res, bytes, worker) => {
+            let merged = Merged::from_bytes(&bytes).map_err(|e| Some(ApiError::invalid(e)))?;
+            (res.skipped, res.pairs, res.poses, res.audits, merged, res.walls, Some(worker))
+        }
+        other => {
+            if let Offered::Failed(why) = other {
+                st.log("check", format!("Registration came back to the bridge: {why}"), "bridge", Some(project_id), &[("job_id", job_id)]);
+            }
+            let (skipped, pairs, poses, audits, merged, ws) = register_here(st, job_id, &stations, pairs0).await?;
+            (skipped, pairs, poses, audits, merged, ws, None)
+        }
+    };
+    stations.retain(|(n, _)| !skipped.iter().any(|s| s.0 == *n));
+    let ids: Vec<String> = stations.iter().map(|s| s.1.clone()).collect();
     if cancel_requested(st, job_id) {
         return Err(None);
     }
@@ -444,6 +388,9 @@ async fn register_once(st: &Arc<AppState>, job_id: &str, project_id: &str) -> Re
     };
     reg.summarise();
     if let Some(path) = st.merged_path(project_id) {
+        if let Some(dir) = path.parent() {
+            tokio::fs::create_dir_all(dir).await.map_err(|e| Some(ApiError::cache(format!("registration directory: {e}"))))?;
+        }
         let tmp = path.with_extension(format!("merged.{}", crate::util::new_id("tmp")));
         let w = tokio::fs::write(&tmp, merged.to_bytes()).await.and(tokio::fs::rename(&tmp, &path).await);
         if let Err(e) = w {
@@ -499,7 +446,8 @@ async fn register_once(st: &Arc<AppState>, job_id: &str, project_id: &str) -> Re
     for (n, why) in &skipped {
         st.log("check", format!("Station {n} could not be registered: {why}"), "bridge", Some(project_id), &[]);
     }
-    st.log("note", format!("Registration: {}", reg.summary), "bridge", Some(project_id), &[("job_id", job_id)]);
+    let on = by.as_deref().map(|w| format!(" (registered on {w})")).unwrap_or_default();
+    st.log("note", format!("Registration{on}: {}", reg.summary), "bridge", Some(project_id), &[("job_id", job_id)]);
 
     // The mission's wall faces, judged again.
     let geo = st.geo(project_id);
@@ -516,6 +464,130 @@ async fn register_once(st: &Arc<AppState>, job_id: &str, project_id: &str) -> Re
     }
     let placed = reg.stations.iter().filter(|s| s.pose.is_some()).count();
     Ok(serde_json::json!({"project_id": project_id, "stations": reg.stations.len(), "placed": placed, "summary": reg.summary}))
+}
+
+type Registered = (Vec<(u16, String)>, Vec<crate::register::Pair>, Vec<Option<crate::register::Pose>>, Vec<crate::register::Audit>, crate::register::Merged, Vec<crate::register::Wall>);
+
+/// Register on the bridge: decode stations not seen before into 5 cm clouds
+/// (kept on disk), then place, audit and merge. Prepared clouds and pair
+/// checks stay in memory, so a new station costs about one station's work.
+/// Returns the stations that couldn't be decoded first.
+async fn register_here(st: &Arc<AppState>, job_id: &str, stations: &[(u16, String)], pairs0: Vec<crate::register::Pair>) -> Result<Registered, Option<ApiError>> {
+    use crate::files::{scan_file, FileKind};
+    use crate::register::{audit, prepare, register_all, walls, Cloud, Merged, Prepared};
+    let dir = st.data_dir.join("registration");
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| Some(ApiError::cache(format!("registration directory: {e}"))))?;
+    let mut skipped: Vec<(u16, String)> = Vec::new();
+    let total = stations.len().max(1);
+    for (k, (n, id)) in stations.iter().enumerate() {
+        let path = dir.join(format!("{id}.cloud"));
+        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            continue;
+        }
+        if update(st, job_id, |r| {
+            r.job.phase = Some(format!("decoding station {n}"));
+            r.job.progress = Some(k as f64 / total as f64 * 0.4);
+        }) {
+            return Err(None);
+        }
+        let tzf = match unless_cancelled(st, job_id, scan_file(st, id, FileKind::Tzf)).await {
+            None => return Err(None),
+            Some(Ok(p)) => p,
+            Some(Err(e)) => {
+                skipped.push((*n, e.title.to_string()));
+                continue;
+            }
+        };
+        let res = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+            let t = trimble_tzf::Tzf::open(&tzf).map_err(|e| format!("open: {e}"))?;
+            let meta = t.scan_meta().map_err(|e| format!("metadata: {e}"))?;
+            let pts = t.grid_points().map_err(|e| format!("decode: {e}"))?;
+            Ok(Cloud::from_grid(&pts, crate::view::step_rad(&meta)).to_bytes())
+        })
+        .await;
+        match res {
+            Ok(Ok(bytes)) => {
+                let tmp = path.with_extension(format!("cloud.{}", crate::util::new_id("tmp")));
+                let w = tokio::fs::write(&tmp, &bytes).await.and(tokio::fs::rename(&tmp, &path).await);
+                if let Err(e) = w {
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                    return Err(Some(ApiError::cache(format!("station cloud: {e}"))));
+                }
+            }
+            Ok(Err(e)) => skipped.push((*n, e)),
+            Err(e) => skipped.push((*n, e.to_string())),
+        }
+    }
+    let kept: Vec<(u16, String)> = stations.iter().filter(|(n, _)| !skipped.iter().any(|s| s.0 == *n)).cloned().collect();
+    if update(st, job_id, |r| {
+        r.job.phase = Some("matching".into());
+        r.job.progress = Some(0.4);
+    }) {
+        return Err(None);
+    }
+    let ids: Vec<String> = kept.iter().map(|s| s.1.clone()).collect();
+    let numbers: Vec<u16> = kept.iter().map(|s| s.0).collect();
+    let (st2, job2) = (st.clone(), job_id.to_string());
+    let out = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        let mut prep: Vec<Arc<Prepared>> = Vec::with_capacity(ids.len());
+        for id in &ids {
+            let cached = st2.prepared.lock().unwrap().get(id).cloned();
+            let p = match cached {
+                Some(p) => p,
+                None => {
+                    let bytes = std::fs::read(dir.join(format!("{id}.cloud"))).map_err(|e| format!("station cloud {id}: {e}"))?;
+                    let p = Arc::new(prepare(&Cloud::from_bytes(&bytes)?));
+                    st2.prepared.lock().unwrap().insert(id.clone(), p.clone());
+                    p
+                }
+            };
+            prep.push(p);
+        }
+        // Keep memory to the project at hand once it grows.
+        {
+            let mut c = st2.prepared.lock().unwrap();
+            if c.len() > 64 {
+                c.retain(|k, _| ids.contains(k));
+            }
+        }
+        let refs: Vec<&Prepared> = prep.iter().map(|p| p.as_ref()).collect();
+        let say = |b: usize, a: usize| {
+            update(&st2, &job2, |r| r.job.phase = Some(format!("matching station {} against {}", numbers[b], numbers[a])));
+        };
+        let (pairs, poses) = register_all(&ids, &refs, pairs0, &say);
+        update(&st2, &job2, |r| r.job.phase = Some("checking".into()));
+        let names: Vec<String> = numbers.iter().map(u16::to_string).collect();
+        let mut cache = std::mem::take(&mut *st2.audit_cache.lock().unwrap());
+        let audits = audit(&ids, &names, &refs, &poses, &pairs, &mut cache);
+        if cache.len() > 4000 {
+            cache.retain(|(a, b), _| ids.contains(a) && ids.contains(b));
+        }
+        *st2.audit_cache.lock().unwrap() = cache;
+        let mut merged = Merged::default();
+        for (k, p) in poses.iter().enumerate() {
+            if let Some(p) = p {
+                merged.add(refs[k], p, numbers[k]);
+            }
+        }
+        let ws = walls(&merged);
+        Ok((pairs, poses, audits, merged, ws))
+    })
+    .await;
+    match out {
+        Ok(Ok((pairs, poses, audits, merged, ws))) => Ok((skipped, pairs, poses, audits, merged, ws)),
+        Ok(Err(e)) => Err(Some(ApiError::cache(e))),
+        Err(e) => Err(Some(ApiError::conflict(e.to_string()))),
+    }
+}
+
+/// Set a job's phase (and progress) from elsewhere, e.g. a worker's report.
+pub fn set_phase(st: &AppState, job_id: &str, phase: &str, progress: Option<f64>) {
+    update(st, job_id, |r| {
+        r.job.phase = Some(phase.to_string());
+        if progress.is_some() {
+            r.job.progress = progress;
+        }
+    });
 }
 
 enum Idle {

@@ -30,7 +30,9 @@ mod station;
 mod ui;
 mod util;
 mod view;
+mod work;
 mod worker;
+mod workmode;
 
 use anyhow::{bail, Context};
 use model::{Caller, Role, Rules};
@@ -63,8 +65,10 @@ fn load_tokens(path: &str) -> anyhow::Result<HashMap<String, Caller>> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("register") {
-        return register::cli(&args[1..]);
+    match args.first().map(String::as_str) {
+        Some("register") => return register::cli(&args[1..]),
+        Some("worker") => return workmode::run(&args[1..]).await,
+        _ => {}
     }
     let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
     let base = env("X9_BASE", x9_client::DEFAULT_BASE);
