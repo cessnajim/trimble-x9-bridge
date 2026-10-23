@@ -97,7 +97,7 @@ mod tests {
                 note: None,
             },
             grant_id: "g1".into(),
-            granted_by: "jim".into(),
+            granted_by: "crew".into(),
             scans_used: used,
             expires_unix: 2_000_000_000,
         }

@@ -64,7 +64,7 @@ trademarks of their respective owners.
 | [docs/tools.md](docs/tools.md) | The `x9` CLI, the `x9-mock` simulator, and the tests |
 | [api/bridge-v1.openapi.yaml](api/bridge-v1.openapi.yaml) | The API spec (OpenAPI 3.1; planned parts marked `x-status: planned`) |
 | [docs/bridge-api-v1.md](docs/bridge-api-v1.md) | Design notes and what was tested on a real X9 |
-| [ops/README.md](ops/README.md) | Running the bridge as a systemd service; the USB link helper |
+| [ops/README.md](ops/README.md) | Building a field kit from a fresh Raspberry Pi: the USB-C link, the scanner links, the bridge service, the MCP server, the laptop |
 | [PROVENANCE.md](PROVENANCE.md) | How the scanner API knowledge was obtained |
 
 ## Layout
@@ -75,13 +75,14 @@ trademarks of their respective owners.
 | `crates/x9-client` | Client for the scanner's HTTP API |
 | `crates/x9-mock` | Scanner simulator: scans with realistic phases, area scans, cancel, failure modes |
 | `crates/x9-cli` | Small CLI over the client |
-| `ops/` | systemd unit for the bridge, and `x9-netctl` to bring the scanner's USB link up isolated (no default route, no DNS) |
+| `ops/` | The field-kit build: the bridge service and launcher, the USB-C gadget, NetworkManager profiles, the scanner Wi-Fi preference, and `x9-netctl` for desk machines |
 
 ## Install
 
-Release builds for Linux x86_64 and aarch64 (Raspberry Pi 4/5) are on the
+Release builds for Linux x86_64 and aarch64 (Raspberry Pi 4/5) and macOS (for
+laptop workers) are on the
 [releases page](https://github.com/northidaholabs/trimble-x9-bridge/releases): each
-archive has `x9-bridge`, `x9-mock`, the `x9` CLI and `ops/` (the systemd unit and `x9-netctl`).
+archive has `x9-bridge`, `x9-mock`, the `x9` CLI, `ops/` (the field-kit build) and `docs/`.
 
 ## Try it against the simulator
 
@@ -115,8 +116,9 @@ tools, with previews returned as images and recipes as a prompt.
 
 ## Status
 
-Version 0.9.0: the API is a draft. Tested against the simulator and on a real X9
-(status, an approved full dome, two granted area scans).
+Version 0.12.0: the API is a draft, tested against the simulator and on a real X9
+(scans, measurements, multi-station registration, laptop workers). To build a
+field kit from a fresh Raspberry Pi, see [ops/README.md](ops/README.md).
 
 ## License
 

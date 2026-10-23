@@ -3,14 +3,16 @@
 # Confines the root operations Claude may run (sudo -n /usr/local/sbin/x9-netctl <verb>).
 # Review before installing.
 #
-# Config via environment (defaults match the reference Fedora dev box):
+# Config via environment (set them for your machine; the uplink verbs and
+# usb-up refuse to run without the gateway and interface names):
 #   X9_GW, X9_ETH_CON, X9_ETH_DEV, X9_WIFI_DEV, X9_ETH_METRIC, X9_WIFI_METRIC
 set -euo pipefail
 
-GW=${X9_GW:-192.168.88.1}
+GW=${X9_GW:-}
 ETH_CON=${X9_ETH_CON:-"Wired connection 1"}
-ETH_DEV=${X9_ETH_DEV:-enp3s0}
-WIFI_DEV=${X9_WIFI_DEV:-wlo1}
+ETH_DEV=${X9_ETH_DEV:-}
+WIFI_DEV=${X9_WIFI_DEV:-}
+need() { for v in "$@"; do eval "[ -n \"\${$v}\" ]" || { echo "ERROR: set X9_${v} (see the header of $0)" >&2; exit 2; }; done; }
 ETH_METRIC=${X9_ETH_METRIC:-100}
 WIFI_METRIC=${X9_WIFI_METRIC:-600}
 REVERT_UNIT=x9-net-revert
@@ -42,6 +44,7 @@ case "${1:-}" in
     ;;
 
   uplink-ethernet)
+    need GW ETH_DEV
     secs=${2:-240}
     systemctl stop "${REVERT_UNIT}.timer" 2>/dev/null || true
     systemctl reset-failed "${REVERT_UNIT}.service" 2>/dev/null || true
@@ -54,6 +57,7 @@ case "${1:-}" in
     ;;
 
   uplink-wifi)
+    need GW ETH_DEV WIFI_DEV
     nmcli con mod "$ETH_CON" ipv4.gateway "" ipv4.route-metric -1
     nmcli dev reapply "$ETH_DEV" || true
     ip route del default dev "$ETH_DEV" 2>/dev/null || true
@@ -68,15 +72,16 @@ case "${1:-}" in
     ;;
 
   usb-up)
-    # Bring up the X9's USB-RNDIS interface, STRICTLY ISOLATED:
+    need GW ETH_DEV
+    # Bring up the X9's USB network interface, STRICTLY ISOLATED:
     # never a default route, never its DNS, high metric. Then re-assert the
-    # wired uplink so the scanner can never hijack Fedora's networking.
+    # wired uplink so the scanner can never take over this machine's networking.
     modprobe rndis_host 2>/dev/null || true
     modprobe cdc_ether 2>/dev/null || true
     IFACE=""
     for _ in $(seq 1 12); do IFACE=$(find_x9_iface || true); [ -n "$IFACE" ] && break; sleep 1; done
     if [ -z "$IFACE" ]; then
-      echo "ERROR: no RNDIS/CDC interface appeared. Is the X9 plugged in and powered?"
+      echo "ERROR: no scanner USB interface (cdc_eem, rndis_host, cdc_ether) appeared. Is the X9 plugged in and powered?"
       echo "USB present?:"; lsusb | grep -i "099e:0200" || echo "  (099e:0200 not in lsusb)"
       exit 1
     fi

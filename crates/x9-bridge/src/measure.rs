@@ -1,7 +1,7 @@
 //! Measurements. v1 measures one thing: a window's finished opening, the hole
 //! in the wall face, from one levelled close-up scan.
 //!
-//! Method (port of ai-first-scanning `tools/measure/measure_opening.py`):
+//! Method (port of a Python prototype):
 //! 1. Drop points within 0.3 m of the scanner.
 //! 2. The wall's direction is the largest vertical plane (RANSAC on a fixed,
 //!    evenly spaced subsample). In a tight close-up that plane is often the

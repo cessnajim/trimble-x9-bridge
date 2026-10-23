@@ -374,7 +374,7 @@ mod tests {
         assert!(m.update(&[up("north", Some(Status::Declined), &[], "")], &scans, &Geo::none()).unwrap_err().contains("says why"));
         m.update(&[up("north", Some(Status::Declined), &[], "behind a locked fence")], &scans, &Geo::none()).unwrap();
         assert_eq!(m.tally(), "1 covered, 1 declined");
-        assert!(m.sign_off("jim", None).is_err());
+        assert!(m.sign_off("crew", None).is_err());
         m.ready("South seen from s1; north behind a locked fence.").unwrap();
         assert_eq!(m.state, State::Ready);
         // A change sends it back to work.
@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(m.state, State::Active);
         m.update(&[up("east", Some(Status::Covered), &["s2"], "")], &scans, &Geo::none()).unwrap();
         m.ready("done").unwrap();
-        m.sign_off("jim", Some("asked in the chat".into())).unwrap();
+        m.sign_off("crew", Some("asked in the chat".into())).unwrap();
         assert_eq!(m.state, State::SignedOff);
         assert!(m.update(&[up("west", None, &[], "")], &scans, &Geo::none()).unwrap_err().contains("signed off"));
     }

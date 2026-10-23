@@ -11,9 +11,9 @@ The bridge service is the only thing that talks to the scanner. Every client
 frameworks calling operations as functions) uses this API, and the rules live
 here, not in any client.
 
-Decided 2026-10-20: the service is **Rust**, in this workspace (a new
-`x9-bridge` crate on top of `x9-client`), with a **Python worker** for
-measurement until that code is ported.
+Decided 2026-10-20: the service is **Rust**, in this workspace (the
+`x9-bridge` crate on top of `x9-client`). Measurement was later ported into
+the bridge, and registration can run on a laptop worker (`x9-bridge worker`).
 
 ## Resource model
 
@@ -144,7 +144,7 @@ X9_BASE=http://127.0.0.1:34599/api/v1 BRIDGE_TOKENS=tokens target/release/x9-bri
 
 ## Tested on the real X9 (2026-10-20)
 
-Bridge on the Fedora box, scanner over its Wi-Fi (the scanner API at
+Bridge on a desktop, scanner over its Wi-Fi (the scanner API at
 `192.168.43.1:34567`, reached through the Pi). Agent token for requests,
 operator token for approvals.
 
@@ -160,7 +160,7 @@ Cancel on the real X9 (2026-10-20, field Pi over the scanner's Wi-Fi): `POST /jo
 Verified on the real X9 the same day (5ad67aa): a full dome cancelled 1 s into the sweep, an area scan queued 0.1 s later. The bridge logged that it was waiting, launched the area scan once the scanner cleared the old task (13.3 s after the cancel), and both cancelled jobs carried the right `partial_scan_id`. While waiting, the job reads phase `leveling`; a `waiting` phase would be clearer. The scanner filed that area scan under the cancelled dome's station (`8_1.tzf` under `8.tzf`): an area scan belongs to the latest station even when that station's dome was cancelled.
 
 Found and fixed: approval / cancel / finish log entries lacked the project id;
-default port moved from 8790 (taken on the Fedora box) to 8795.
+default port moved from 8790 (taken on the development machine) to 8795.
 
 ## Recipes v0 (2026-10-20)
 

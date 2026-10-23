@@ -1,0 +1,46 @@
+#!/bin/sh
+# Create the NetworkManager profiles a field Pi needs (run once, as root):
+#   usb-gadget  the USB-C link to the laptop: the Pi is 10.55.0.1/24 and gives
+#               the laptop an address with no gateway and no DNS
+#   x9-usb      the scanner over USB (driver cdc_eem): never the default route
+#   x9-wifi     the scanner's own Wi-Fi access point: preferred over other
+#               Wi-Fi (priority 10), never the default route, scanner DNS ignored
+#
+#   sudo ops/setup-nm-profiles <scanner Wi-Fi name, e.g. TRIMBLE-X9-12345>
+#
+# The scanner's Wi-Fi passphrase is asked for on the terminal and must be
+# typed by a person: it is whatever was set on the scanner (often not the
+# factory one), and an agent must never guess or type it. It is stored
+# root-only in the profile. Re-running replaces the three profiles.
+set -eu
+SSID=${1:?usage: setup-nm-profiles <scanner Wi-Fi name>}
+if [ ! -t 0 ]; then
+  echo "setup-nm-profiles asks for the passphrase on a terminal: run it in an interactive session (ssh -t)." >&2
+  exit 2
+fi
+GADGET_MAC=${X9_GADGET_MAC:-02:58:39:00:00:01}   # dev_addr in usb-gadget-ncm
+WIFI_DEV=${X9_WIFI_DEV:-wlan0}
+fresh() { nmcli -t -f NAME connection show | grep -qx "$1" && nmcli connection delete "$1" >/dev/null || true; }
+
+# Matched by MAC: NetworkManager names configfs gadgets by driver
+# (configfs-gadget.<name>), not by a stable interface name.
+fresh usb-gadget
+nmcli connection add type ethernet con-name usb-gadget ethernet.mac-address "$GADGET_MAC" \
+  ipv4.method shared ipv4.addresses 10.55.0.1/24 ipv4.never-default yes ipv6.method link-local \
+  connection.autoconnect yes connection.autoconnect-priority 100 >/dev/null
+
+fresh x9-usb
+nmcli connection add type ethernet con-name x9-usb match.driver cdc_eem \
+  ipv4.method auto ipv4.never-default yes ipv4.ignore-auto-dns yes ipv6.method disabled \
+  connection.autoconnect yes connection.autoconnect-priority -999 >/dev/null
+
+printf 'Passphrase of %s (a person types it; not shown): ' "$SSID"
+stty -echo; read -r PSK; stty echo; echo
+fresh x9-wifi
+nmcli connection add type wifi con-name x9-wifi ifname "$WIFI_DEV" ssid "$SSID" \
+  wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$PSK" \
+  ipv4.method auto ipv4.never-default yes ipv4.ignore-auto-dns yes ipv6.method disabled \
+  connection.mdns 2 connection.autoconnect yes connection.autoconnect-priority 10 \
+  connection.autoconnect-retries 0 >/dev/null
+unset PSK
+echo "Created usb-gadget, x9-usb and x9-wifi. Join the scanner now with: sudo nmcli connection up x9-wifi"

@@ -44,7 +44,8 @@ not accept as sent.
 ### Release archives
 
 Tagged releases have archives for Linux `x86_64` and `aarch64` (Raspberry Pi
-4/5) on the
+4/5), and for macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`, for laptop
+workers), on the
 [releases page](https://github.com/northidaholabs/trimble-x9-bridge/releases).
 Each archive is named `trimble-x9-bridge-<tag>-<target>.tar.gz` and comes with
 a `.sha256` file. It contains:
@@ -54,11 +55,12 @@ a `.sha256` file. It contains:
 | `x9-bridge` | The bridge service |
 | `x9-mock` | The scanner simulator ([tools.md](tools.md#x9-mock)) |
 | `x9` | A small CLI over the scanner API ([tools.md](tools.md#the-x9-cli)) |
-| `ops/` | `x9-bridge.service`, `x9-bridge-run`, `90-x9-bridge`, `x9-netctl`, `README.md` |
+| `ops/` | The field-kit build: the bridge service and launcher, the USB-C gadget, NetworkManager profiles, the scanner Wi-Fi preference, `env.example` and `README.md` (a step-by-step build of a field Pi) |
+| `docs/` | This guide and the other docs |
 | `README.md`, `PROVENANCE.md`, `LICENSE`, `NOTICE` | |
 
 ```bash
-tag=v0.1.2; target=aarch64-unknown-linux-gnu
+tag=v0.12.0; target=aarch64-unknown-linux-gnu
 curl -LO https://github.com/northidaholabs/trimble-x9-bridge/releases/download/$tag/trimble-x9-bridge-$tag-$target.tar.gz
 curl -LO https://github.com/northidaholabs/trimble-x9-bridge/releases/download/$tag/trimble-x9-bridge-$tag-$target.tar.gz.sha256
 sha256sum -c trimble-x9-bridge-$tag-$target.tar.gz.sha256
@@ -84,7 +86,7 @@ The bridge refuses to start without a token file (see [Tokens](#tokens)).
 printf 'me operator %s\n' "$(openssl rand -hex 16)" > tokens
 chmod 600 tokens
 X9_BASE=http://192.168.42.1:34567/api/v1 BRIDGE_TOKENS=tokens ./x9-bridge
-# x9-bridge 0.1.2 listening on http://127.0.0.1:8795/v1 (scanner http://192.168.42.1:34567/api/v1)
+# x9-bridge 0.12.0 listening on http://127.0.0.1:8795/v1 (scanner http://192.168.42.1:34567/api/v1)
 ```
 
 To try it without a scanner, start `x9-mock` first and point `X9_BASE` at it
@@ -285,14 +287,14 @@ H="Authorization: Bearer $TOKEN"
 
 ```bash
 curl -s $B/health
-# {"ok":true,"version":"0.1.2"}
+# {"ok":true,"version":"0.12.0"}
 
 curl -s -H "$H" $B/status
 ```
 
 ```json
 {
-  "bridge": {"version": "0.1.2", "started_at": "2026-10-20T12:00:00Z",
+  "bridge": {"version": "0.12.0", "started_at": "2026-10-20T12:00:00Z",
              "queue_length": 0, "worker_ready": false},
   "scanner": {
     "connected": true,
@@ -310,7 +312,7 @@ curl -s -H "$H" $B/status
 | Field | Meaning |
 | --- | --- |
 | `bridge.queue_length` | Scan jobs `queued` or `awaiting_approval` |
-| `bridge.worker_ready` | Whether the measurement worker is available. Always `false`: the worker is not built yet. |
+| `bridge.worker_ready` | Reserved; always `false`. Measurement runs in the bridge itself, and laptop workers are listed by `GET /v1/workers`. |
 | `scanner.connected` | `false` when the scanner did not answer. The other scanner fields are then missing. |
 | `scanner.busy` | The scanner reports a current task (from any client) |
 | `scanner.current_job_id` | The bridge's scan job in state `running`, if any. Exports run beside the scanner and never show here. |
@@ -804,7 +806,7 @@ curl -s -H "$H" -o plan.png $B/scans/$SCAN/coverage/image          # the plan (P
 
 The first request for a scan downloads its file (if not cached) and decodes
 it; the three results are written to the data directory and later requests
-are served from there. Builds run one at a time. On Fedora (x86) a 6.3 M point
+are served from there. Builds run one at a time. On a desktop (x86) a 6.3 M point
 full dome takes about 0.6 s once the file is cached.
 
 **`/view`** keeps every *k*th row and column of the scan grid so that about
@@ -924,8 +926,8 @@ the plan draws the others amber with a question mark, and the field log says
 why and what to do. On the recorded 12-station survey every station is
 confirmed (fresh fits within 9 mm and 0.015°, free space under 2%). Planted
 errors of 2 cm and up, and 0.1° and up, make exactly the moved station
-doubtful, and the stations around it stay confirmed. `tools/register/bench.sh` in the hub repeats this
-on a recorded survey. Unit tests cover a corridor (weakly held), a symmetric
+doubtful, and the stations around it stay confirmed. A bench script repeats this on a recorded survey
+(the recordings are not public). Unit tests cover a corridor (weakly held), a symmetric
 room (ambiguous), the same room with a partition (the right fit, by free
 space), and a misplaced station among three.
 
@@ -962,7 +964,7 @@ decode and 45–50 s to place; decoding a scan briefly needs about 0.9 GB.
 
 Registration runs one at a time per project; a station that lands while one
 runs makes it run once more. Each result is announced as a `registration`
-event and saved to `registrations.json`, so a restart keeps it. On the
+event and saved to `registrations.json`, so a restart keeps it. On
 a recorded 12-station survey around a house, every station places, the
 pairs agree within 9 mm after the global fit, and a station takes about
 35 s on a Raspberry Pi 4 (9 s decoding, 23 s searching, a second or two per
@@ -1133,7 +1135,7 @@ another agent gets `403 forbidden`.
 ## Web UI
 
 The bridge serves a small web app at `/ui/` (and redirects `/` there): the
-same API, for the person in the field on the laptop (a tablet or phone works too).
+same API, for the person in the field on the laptop.
 With an agent, the person doesn't need it: the MCP server asks them for the
 visit's permission and the sign-off in the chat (see the TrimbleX9-mcp README,
 "The person, in the chat"). The web UI is for looking (the 3D viewer, coverage,
@@ -1269,9 +1271,12 @@ $BRIDGE_DATA/
 - Scan ids in paths must be hexadecimal with dashes (up to 64 characters);
   anything else is `404`, so a path cannot leave the cache directory.
 
+Kept across restarts, in the data directory: grants (`grants.json`), missions
+(`missions.json`), registrations (`registrations.json`, `registration/`).
+
 What is kept only in memory and lost on restart:
 
-- jobs, approvals and grants;
+- jobs and approvals;
 - runs;
 - the field log;
 - export metadata (the files stay on disk but cannot be fetched through the

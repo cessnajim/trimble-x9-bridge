@@ -1,0 +1,18 @@
+# The Pi's USB-C port as a network link to the laptop (CDC-NCM). Install:
+#   sudo install -m 0755 ops/usb-gadget-ncm /usr/local/sbin/
+#   sudo install -m 0644 ops/usb-gadget-ncm.service /etc/systemd/system/
+#   sudo systemctl enable --now usb-gadget-ncm
+[Unit]
+Description=USB-C CDC-NCM network link to the laptop (x9 bridge)
+After=systemd-modules-load.service
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/usb-gadget-ncm
+ExecStop=/usr/local/sbin/usb-gadget-ncm stop
+
+[Install]
+WantedBy=multi-user.target
