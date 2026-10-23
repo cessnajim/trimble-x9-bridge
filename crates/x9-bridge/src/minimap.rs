@@ -102,9 +102,13 @@ impl Minimap {
         if pts.is_empty() {
             (x0, y0, x1, y1) = (-5.0, -5.0, 5.0, 5.0);
         }
-        let pad = 1.5;
+        // The margin is at least 1.5 m and at least MARGIN_PX, so a station's
+        // number (drawn above and right of its dot) stays inside the picture
+        // at any scale; on a large site 1.5 m is only a dozen pixels.
+        let span = (x1 - x0).max(y1 - y0);
+        let ppm = ((900.0 - 2.0 * MARGIN_PX) / span.max(1e-6)).clamp(8.0, 120.0);
+        let pad = (1.5f64).max(MARGIN_PX / ppm);
         let (x0, y0, x1, y1) = (x0 - pad, y0 - pad, x1 + pad, y1 + pad);
-        let ppm = (900.0 / (x1 - x0).max(y1 - y0)).clamp(8.0, 120.0);
         let grid = if (x1 - x0).max(y1 - y0) <= 25.0 { 1.0 } else { 5.0 };
         let top = 36.0;
         let w = ((x1 - x0) * ppm).ceil().max(420.0);
@@ -202,6 +206,9 @@ impl Minimap {
     }
 }
 
+/// Room around the drawing for station numbers and face labels, in pixels.
+const MARGIN_PX: f64 = 40.0;
+
 struct Layout {
     x0: f64,
     y1: f64,
@@ -287,6 +294,26 @@ mod tests {
         assert!(svg.contains(r#"stroke-dasharray="4 4""#), "vegetation is dashed");
         let png = m.png();
         assert_eq!(&png[1..4], b"PNG");
+    }
+
+    #[test]
+    fn labels_stay_inside_on_a_large_site() {
+        // 120 m across: at about 7 px/m a 1.5 m margin would be 10 px, and the
+        // top station's number (28 px above its dot) would be cut off.
+        let mut r = reg();
+        for (s, xy) in r.stations.iter_mut().zip([[0.0, 0.0], [120.0, 120.0]]) {
+            if let Some(p) = s.pose.as_mut() {
+                p.xyz_m = [xy[0], xy[1], 0.0];
+            }
+        }
+        let m = Minimap::new(Some(&r), vec![], &[], false);
+        let l = m.layout();
+        for (n, p, _) in &m.stations {
+            let (x, y) = l.px([p.xyz_m[0], p.xyz_m[1]]);
+            assert!(y - 30.0 >= l.top, "station {n}'s number is below the title band");
+            assert!(x + 40.0 <= l.w, "station {n}'s number fits on the right");
+            assert!(x - 16.0 >= 0.0 && y + 16.0 <= l.top + l.map_h, "station {n}'s dot and heading fit");
+        }
     }
 
     #[test]
