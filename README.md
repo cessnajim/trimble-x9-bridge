@@ -10,6 +10,51 @@ behavior ([PROVENANCE.md](PROVENANCE.md)). It contains no vendor code and is
 **not affiliated with or endorsed by Trimble Inc.**; "Trimble" and "X9" are
 trademarks of their respective owners.
 
+<p align="center">
+  <img src="docs/img/connections.svg" width="900"
+       alt="A laptop's agent reaches the MCP server on a Raspberry Pi over ssh on a USB-C cable; the MCP server calls x9-bridge; the bridge drives the Trimble X9 over the scanner's Wi-Fi or USB. An optional worker on the laptop registers stations.">
+</p>
+
+In the field the bridge runs on a Raspberry Pi on the tripod. The agent on
+the laptop drives it through the MCP server over one USB-C cable; the laptop
+keeps its own internet, and nothing routes through the Pi.
+
+## What you get
+
+A 19-station colour scan of an administration building, replayed through the
+bridge: each station registered by itself as it landed, all of them
+confirmed by the audit, every pair of stations within about 22 mm.
+
+<table>
+<tr>
+<td width="33%"><img src="docs/img/admin-plan.jpg" alt="Registered plan of all 19 stations of the administration building, seen from above."></td>
+<td width="33%"><img src="docs/img/admin-minimap.png" alt="Minimap of the administration building: walls as lines, building walls separate from low walls and vegetation, numbered station dots."></td>
+<td width="33%"><img src="docs/img/admin-coverage.png" alt="Coverage plan of one station: what the scanner saw and where it was blocked."></td>
+</tr>
+<tr>
+<td valign="top"><b>Registered plan</b>: every station in one frame, from
+above, each with a verdict from independent checks
+(<code>scanner_registration</code>).</td>
+<td valign="top"><b>Minimap</b>, redrawn after every station: building
+walls, low walls and vegetation, and the stations by number. In the chat
+(<code>scanner_minimap</code>) and the web UI.</td>
+<td valign="top"><b>Coverage</b> of one station: point spacing, and what
+the scanner saw and where it was blocked. The agent looks at it before
+proposing the next station.</td>
+</tr>
+</table>
+
+## Build a field kit
+
+<p align="center">
+  <img src="docs/img/setup.svg" width="900"
+       alt="Building a field kit in seven layers, each checked before the next: the Pi, the USB-C link, the scanner links, the bridge, the MCP server, the laptop, and an acceptance scan. Steps 1, 3 and 7 need a person.">
+</p>
+
+From a fresh Raspberry Pi to an acceptance scan in seven layers, each with a
+check: [ops/README.md](ops/README.md). An agent can follow it; three steps
+need a person at the kit.
+
 ## What it does
 
 - **Scans:** full-dome and area scans, queued one at a time, with phases
@@ -62,7 +107,7 @@ trademarks of their respective owners.
 | [docs/recipes.md](docs/recipes.md) | Recipe format v0 and how runs execute |
 | [docs/errors.md](docs/errors.md) | Every error `code`, its HTTP status, when it happens and its hint |
 | [docs/tools.md](docs/tools.md) | The `x9` CLI, the `x9-mock` simulator, and the tests |
-| [api/bridge-v1.openapi.yaml](api/bridge-v1.openapi.yaml) | The API spec (OpenAPI 3.1; planned parts marked `x-status: planned`) |
+| [api/bridge-v1.openapi.yaml](https://github.com/northidaholabs/trimble-x9-bridge/blob/main/api/bridge-v1.openapi.yaml) | The API spec (OpenAPI 3.1; planned parts marked `x-status: planned`) |
 | [docs/bridge-api-v1.md](docs/bridge-api-v1.md) | Design notes and what was tested on a real X9 |
 | [ops/README.md](ops/README.md) | Building a field kit from a fresh Raspberry Pi: the USB-C link, the scanner links, the bridge service, the MCP server, the laptop |
 | [PROVENANCE.md](PROVENANCE.md) | How the scanner API knowledge was obtained |
@@ -116,7 +161,7 @@ tools, with previews returned as images and recipes as a prompt.
 
 ## Status
 
-Version 0.12.0: the API is a draft, tested against the simulator and on a real X9
+Version 0.12.1: the API is a draft, tested against the simulator and on a real X9
 (scans, measurements, multi-station registration, laptop workers). To build a
 field kit from a fresh Raspberry Pi, see [ops/README.md](ops/README.md).
 

@@ -35,6 +35,7 @@ nmcli connection add type ethernet con-name x9-usb match.driver cdc_eem \
   connection.autoconnect yes connection.autoconnect-priority -999 >/dev/null
 
 printf 'Passphrase of %s (a person types it; not shown): ' "$SSID"
+trap 'stty echo' EXIT INT TERM
 stty -echo; read -r PSK; stty echo; echo
 fresh x9-wifi
 nmcli connection add type wifi con-name x9-wifi ifname "$WIFI_DEV" ssid "$SSID" \
@@ -43,4 +44,4 @@ nmcli connection add type wifi con-name x9-wifi ifname "$WIFI_DEV" ssid "$SSID" 
   connection.mdns 2 connection.autoconnect yes connection.autoconnect-priority 10 \
   connection.autoconnect-retries 0 >/dev/null
 unset PSK
-echo "Created usb-gadget, x9-usb and x9-wifi. Join the scanner now with: sudo nmcli connection up x9-wifi"
+echo "Created usb-gadget, x9-usb and x9-wifi. The Pi joins the scanner's Wi-Fi when it is in range (this drops home Wi-Fi: work over the USB-C link, 10.55.0.1)." 

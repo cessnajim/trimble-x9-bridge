@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" role="img" aria-label="The laptop's agent reaches the MCP server on the Raspberry Pi over ssh on the USB-C cable; the MCP server calls x9-bridge over HTTP; an optional worker on the laptop takes registration jobs from the bridge; the bridge drives the Trimble X9 over the scanner's Wi-Fi or USB; the laptop keeps its own internet and nothing routes through the Pi." font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <style>
+    .box { fill: #f6f8fa; stroke: #d0d7de; }
+    .sub { fill: #ffffff; stroke: #d0d7de; }
+    .key { fill: #ddf4ff; stroke: #0969da; }
+    .t { fill: #1f2328; }
+    .m { fill: #57606a; }
+    .ln { stroke: #57606a; fill: none; }
+    .lnf { fill: #57606a; }
+    .acc { stroke: #0969da; fill: none; }
+    .accf { fill: #0969da; }
+    .cable { fill: #eaeef2; }
+    @media (prefers-color-scheme: dark) {
+      .box { fill: #161b22; stroke: #30363d; }
+      .sub { fill: #0d1117; stroke: #30363d; }
+      .key { fill: #0c2d6b; stroke: #4493f8; }
+      .t { fill: #e6edf3; }
+      .m { fill: #8b949e; }
+      .ln { stroke: #8b949e; }
+      .lnf { fill: #8b949e; }
+      .acc { stroke: #4493f8; }
+      .accf { fill: #4493f8; }
+      .cable { fill: #21262d; }
+    }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="lnf"/></marker>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="accf"/></marker>
+  </defs>
+
+  <!-- The USB-C cable: everything between laptop and Pi goes over it -->
+  <rect x="300" y="84" width="70" height="250" rx="6" class="cable"/>
+  <text x="335" y="356" text-anchor="middle" font-size="12" font-weight="600" class="t">USB-C cable</text>
+  <text x="335" y="372" text-anchor="middle" font-size="11" class="m">10.55.0.0/24</text>
+  <text x="335" y="387" text-anchor="middle" font-size="11" class="m">no gateway, no DNS</text>
+
+  <!-- Laptop -->
+  <rect x="24" y="84" width="276" height="250" rx="10" class="box"/>
+  <text x="44" y="110" font-size="15" font-weight="700" class="t">Laptop</text>
+  <text x="44" y="127" font-size="11" class="m">the agent's machine</text>
+  <rect x="44" y="146" width="236" height="54" rx="8" class="key"/>
+  <text x="62" y="169" font-size="13" font-weight="600" class="t">Claude Code</text>
+  <text x="62" y="187" font-size="11" class="m">the agent runs the visit</text>
+  <rect x="44" y="246" width="236" height="54" rx="8" class="sub"/>
+  <text x="62" y="269" font-size="13" font-weight="600" class="t">x9-bridge worker</text>
+  <text x="62" y="287" font-size="11" class="m">optional: registers stations</text>
+
+  <!-- Internet stays on the laptop -->
+  <rect x="64" y="20" width="196" height="34" rx="17" class="sub"/>
+  <text x="162" y="42" text-anchor="middle" font-size="12" class="t">its own internet</text>
+  <line x1="162" y1="56" x2="162" y2="82" class="ln" stroke-width="1.5" marker-start="url(#a)"/>
+  <text x="172" y="74" font-size="11" class="m">site Wi-Fi, Starlink</text>
+
+  <!-- Pi -->
+  <rect x="370" y="84" width="276" height="250" rx="10" class="box"/>
+  <text x="390" y="110" font-size="15" font-weight="700" class="t">Raspberry Pi 4</text>
+  <text x="390" y="127" font-size="11" class="m">on the tripod</text>
+  <rect x="390" y="146" width="236" height="54" rx="8" class="sub"/>
+  <text x="408" y="169" font-size="13" font-weight="600" class="t">MCP server</text>
+  <text x="408" y="187" font-size="11" class="m">scanner_* tools</text>
+  <rect x="390" y="246" width="236" height="54" rx="8" class="key"/>
+  <text x="408" y="269" font-size="13" font-weight="600" class="t">x9-bridge :8795</text>
+  <text x="408" y="287" font-size="11" class="m">rules · grants · jobs · registration</text>
+
+  <!-- X9 -->
+  <rect x="712" y="166" width="224" height="134" rx="10" class="box"/>
+  <text x="732" y="192" font-size="15" font-weight="700" class="t">Trimble X9</text>
+  <text x="732" y="209" font-size="11" class="m">scanner API :34567</text>
+  <text x="732" y="240" font-size="12" class="t">full domes · area scans</text>
+  <text x="732" y="257" font-size="12" class="t">previews · levelling</text>
+  <text x="732" y="284" font-size="11" class="m">a person moves it between stations</text>
+
+  <!-- agent -> MCP server, over ssh on the cable -->
+  <line x1="280" y1="173" x2="388" y2="173" class="acc" stroke-width="2" marker-end="url(#b)"/>
+  <text x="335" y="160" text-anchor="middle" font-size="11" class="t">ssh · MCP</text>
+
+  <!-- MCP server -> bridge -->
+  <line x1="508" y1="200" x2="508" y2="244" class="acc" stroke-width="2" marker-end="url(#b)"/>
+  <text x="498" y="227" text-anchor="end" font-size="11" class="t">HTTP + agent token</text>
+
+  <!-- worker <-> bridge, over the cable -->
+  <line x1="282" y1="273" x2="388" y2="273" class="ln" stroke-width="1.5" stroke-dasharray="5 4" marker-start="url(#a)" marker-end="url(#a)"/>
+  <text x="335" y="263" text-anchor="middle" font-size="11" class="t">jobs · scans</text>
+
+  <!-- bridge -> X9 -->
+  <line x1="626" y1="262" x2="710" y2="226" class="acc" stroke-width="2" marker-end="url(#b)"/>
+  <text x="664" y="223" text-anchor="middle" font-size="11" class="t">scanner Wi-Fi</text>
+  <line x1="626" y1="284" x2="710" y2="276" class="ln" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#a)"/>
+  <text x="668" y="300" text-anchor="middle" font-size="11" class="m">or USB</text>
+</svg>

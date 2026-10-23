@@ -6,23 +6,38 @@ and serves the bridge API. This page builds a field kit from a fresh Pi, layer
 by layer, with a check after each; an agent can follow it step by step. Steps
 marked **person** need someone at the kit.
 
-```
-laptop (agent, its own internet)
-   ⇅  USB-C cable: CDC-NCM network, Pi 10.55.0.1/24, laptop by DHCP (no gateway, no DNS)
-Raspberry Pi 4: x9-bridge :8795, MCP server, NetworkManager
-   ⇅  the X9's own Wi-Fi access point (scanner API 192.168.43.1:34567)
-   ⇅  or USB to the X9 (CDC-EEM, 192.168.42.1), faster for bulk copies
-Trimble X9
-```
+<p align="center">
+  <img src="../docs/img/connections.svg" width="900"
+       alt="Laptop (the agent, its own internet) to Raspberry Pi 4 over a USB-C cable: CDC-NCM, Pi 10.55.0.1/24, laptop by DHCP with no gateway and no DNS. The Pi runs x9-bridge on port 8795 and the MCP server, and reaches the Trimble X9 over the scanner's own Wi-Fi (192.168.43.1:34567) or USB (CDC-EEM, 192.168.42.1).">
+</p>
+
+- **USB-C cable:** a CDC-NCM network; the Pi is `10.55.0.1/24`, the laptop
+  gets an address by DHCP with no gateway and no DNS.
+- **The scanner:** its own Wi-Fi access point (scanner API
+  `192.168.43.1:34567`), or USB (CDC-EEM, `192.168.42.1`), faster for bulk
+  copies.
+
+<p align="center">
+  <img src="../docs/img/setup.svg" width="900"
+       alt="Seven layers, each checked before the next: the Pi (aarch64), the USB-C link (laptop gets 10.55.0.x), the scanner links (scanner answers), the bridge (/v1/health), the MCP server (imports), the laptop (scanner tools listed), acceptance (registered and mapped). Steps 1, 3 and 7 need a person.">
+</p>
 
 The laptop keeps its own internet (any Wi-Fi, Starlink); nothing routes
 through the Pi. The Pi needs no internet in the field.
 
 ## 1. The Pi
 
-Raspberry Pi 4 with Raspberry Pi OS (Debian 13 "trixie", 64-bit), an ssh key
-login for the user who will run the MCP server, and passwordless `sudo` for
-the build (the steps below install system files). Give it a stable hostname.
+**Person:** a Raspberry Pi 4 with Raspberry Pi OS (Debian 13 "trixie",
+64-bit), for example written with Raspberry Pi Imager: a hostname, a user,
+ssh enabled with the laptop's public key, and passwordless `sudo` for that
+user during the build (the steps below install system files). While the Pi
+still has home internet, make sure the few packages the build uses are there:
+
+```bash
+sudo apt-get install -y python3-venv openssl curl dnsmasq-base
+```
+
+(`dnsmasq-base` serves the laptop its address on the USB-C link.)
 
 On a machine with internet, download the release archive for the Pi
 (`trimble-x9-bridge-vX.Y.Z-aarch64-unknown-linux-gnu.tar.gz`, v0.12.1 or later:
@@ -70,6 +85,11 @@ sudo ops/setup-nm-profiles TRIMBLE-X9-12345     # the scanner's Wi-Fi name
 It creates `usb-gadget` (step 2), `x9-usb` (the scanner over USB, driver
 `cdc_eem`) and `x9-wifi` (the scanner's access point: priority 10 over other
 Wi-Fi, never the default route, the scanner's DNS ignored, keeps retrying).
+The Pi has one Wi-Fi radio: joining the scanner's network drops home Wi-Fi.
+Work over the USB-C link (`10.55.0.1`) from here on, or the session you are in
+is cut off; once `x9-wifi` exists, `x9-wifi-prefer` (below) joins it on its
+own.
+
 It asks for the scanner's Wi-Fi passphrase on the terminal: whatever is set on
 the scanner, often not the factory one. The person types it; an agent never
 guesses, types or prints it. It is stored root-only in the profile.
@@ -160,22 +180,17 @@ internet (a wheelhouse built elsewhere) and the launcher, which reads
   ```
 
   (`nc -G` is macOS's connect timeout; on Linux use `nc -z -w 1`.)
+- Accept the Pi's host key under the alias once (the MCP entry below runs ssh
+  in batch mode, which can't answer a host-key question):
+  `ssh -o StrictHostKeyChecking=accept-new x9-bridge true`
 - The MCP server in Claude Code:
   `claude mcp add -s user x9-bridge -- ssh -o BatchMode=yes x9-bridge 'X9_MCP_MODE=bridge ~/x9-bridge/bin/trimblex9-mcp-auto'`
   (quoted, so the Pi's `~` is used, not the laptop's)
 - Optional, a laptop worker for registration (bridge 0.10.0+): the release's
   macOS archive (`aarch64-apple-darwin` for Apple silicon, `x86_64-apple-darwin`
   for Intel). Fetch it with `curl`; a copy downloaded in a browser is
-  quarantined by Gatekeeper until allowed. Copy the agent token without
-  printing it, then start the worker for the visit:
-
-  ```bash
-  mkdir -p ~/.config/x9-worker && (umask 077; ssh x9-bridge 'cat ~/x9-bridge/agent.token' > ~/.config/x9-worker/token)
-  x9-bridge worker --bridge http://10.55.0.1:8795
-  ```
-
-  The agent asks the person once per laptop whether to use it
-  (`scanner_processing`). On the laptop:
+  quarantined by Gatekeeper until allowed. The agent asks the person once per
+  laptop whether to use it (`scanner_processing`); on a yes, on the laptop:
 
   ```bash
   tag=v0.12.1; t=aarch64-apple-darwin      # x86_64-apple-darwin on Intel
@@ -183,7 +198,10 @@ internet (a wheelhouse built elsewhere) and the launcher, which reads
   curl -LO https://github.com/northidaholabs/trimble-x9-bridge/releases/download/$tag/$f.tar.gz
   curl -LO https://github.com/northidaholabs/trimble-x9-bridge/releases/download/$tag/$f.tar.gz.sha256
   shasum -a 256 -c $f.tar.gz.sha256 && tar xzf $f.tar.gz
-  $f/x9-bridge worker --bridge http://10.55.0.1:8795
+  # The agent token, copied without printing it.
+  mkdir -p ~/.config/x9-worker && (umask 077; ssh x9-bridge 'cat ~/x9-bridge/agent.token' > ~/.config/x9-worker/token)
+  # For the visit, in the background; it reconnects by itself.
+  $f/x9-bridge worker --bridge http://10.55.0.1:8795 > ~/.config/x9-worker/log 2>&1 &
   ```
 
 Check: in Claude Code, the `x9-bridge` server lists its `scanner_*` tools and
