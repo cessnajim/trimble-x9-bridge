@@ -1,5 +1,6 @@
 //! The minimap: a plain line drawing of the project so far, redrawn after
-//! every station. Walls are lines, stations are numbered dots with a tick
+//! every station. Walls are lines (building walls bold, low walls thin,
+//! vegetation faint green and dashed), stations are numbered dots with a tick
 //! for the way each scanner faced (amber with "?" while not trusted), and
 //! the mission's wall targets are drawn in their status colours. Stations
 //! scanned but not yet placed are listed under the map. SVG for the web UI,
@@ -24,6 +25,17 @@ const WALL: [u8; 3] = [226, 232, 240];
 const TRUSTED: [u8; 3] = [255, 255, 255];
 const UNTRUSTED: [u8; 3] = [251, 191, 36];
 const TEXT: [u8; 3] = [203, 213, 225];
+const LOW: [u8; 3] = [148, 163, 184];
+const PLANT: [u8; 3] = [110, 200, 120];
+
+/// How a wall run is drawn: colour, width, dashed.
+fn style(kind: &str) -> ([u8; 3], f32, bool) {
+    match kind {
+        "low wall" => (LOW, 1.5, false),
+        "vegetation" => (PLANT, 2.0, true),
+        _ => (WALL, 3.0, false),
+    }
+}
 
 impl Minimap {
     /// From a registration (or none yet), the mission's faces, and the
@@ -49,10 +61,20 @@ impl Minimap {
             notes.push(format!("Station {n}: {}", if registering { "scanned, registering…" } else { "scanned, waiting to register" }));
         }
         let placed = stations.len();
-        let title = match (placed, walls.len()) {
-            (0, _) => "No stations placed yet".to_string(),
-            (p, w) => format!("{p} station{} · {w} wall{} · station {}'s frame, not north", if p == 1 { "" } else { "s" }, if w == 1 { "" } else { "s" },
-                              reg.and_then(|r| r.stations.first()).map(|s| s.station).unwrap_or(1)),
+        let count = |k: &str| walls.iter().filter(|w: &&Wall| style(&w.kind).0 == style(k).0).count();
+        let title = match placed {
+            0 => "No stations placed yet".to_string(),
+            p => {
+                let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+                let mut parts = vec![plural(p, "station", "stations"), plural(count("building"), "wall", "walls")];
+                if count("low wall") > 0 {
+                    parts.push(plural(count("low wall"), "low wall", "low walls"));
+                }
+                if count("vegetation") > 0 {
+                    parts.push(plural(count("vegetation"), "run of vegetation", "runs of vegetation"));
+                }
+                format!("{} · station {}'s frame, not north", parts.join(" · "), reg.map(|r| r.frame_station()).unwrap_or(1))
+            }
         };
         Minimap { walls, stations, faces, notes, title }
     }
@@ -102,9 +124,14 @@ impl Minimap {
         for (a, b) in l.grid_lines() {
             s += &format!(r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="{}" stroke-width="1"/>"#, a.0, a.1, b.0, b.1, c(GRID));
         }
-        for wl in &self.walls {
+        // Vegetation under walls, so a wall behind a hedge stays visible.
+        let mut order: Vec<&Wall> = self.walls.iter().collect();
+        order.sort_by_key(|w| match w.kind.as_str() { "vegetation" => 0, "low wall" => 1, _ => 2 });
+        for wl in order {
             let (a, b) = (l.px(wl.from), l.px(wl.to));
-            s += &format!(r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="{}" stroke-width="2.5" stroke-linecap="round"/>"#, a.0, a.1, b.0, b.1, c(WALL));
+            let (col, width, dashed) = style(&wl.kind);
+            let dash = if dashed { r#" stroke-dasharray="4 4""# } else { "" };
+            s += &format!(r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="{}" stroke-width="{width}" stroke-linecap="round"{dash}/>"#, a.0, a.1, b.0, b.1, c(col));
         }
         for (id, f, col) in &self.faces {
             let (a, b) = (l.px(f.from), l.px(f.to));
@@ -136,8 +163,21 @@ impl Minimap {
         for (a, b) in l.grid_lines() {
             cv.line(f(a), f(b), GRID, 1.0);
         }
-        for wl in &self.walls {
-            cv.line(f(l.px(wl.from)), f(l.px(wl.to)), WALL, 2.5);
+        let mut order: Vec<&Wall> = self.walls.iter().collect();
+        order.sort_by_key(|w| match w.kind.as_str() { "vegetation" => 0, "low wall" => 1, _ => 2 });
+        for wl in order {
+            let (col, width, dashed) = style(&wl.kind);
+            let (a, b) = (f(l.px(wl.from)), f(l.px(wl.to)));
+            if dashed {
+                let len = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+                let n = (len / 8.0).floor() as i32;
+                for k in (0..n).step_by(2) {
+                    let (t0, t1) = (k as f32 / n as f32, ((k + 1) as f32 / n as f32).min(1.0));
+                    cv.line((a.0 + (b.0 - a.0) * t0, a.1 + (b.1 - a.1) * t0), (a.0 + (b.0 - a.0) * t1, a.1 + (b.1 - a.1) * t1), col, width);
+                }
+            } else {
+                cv.line(a, b, col, width);
+            }
         }
         let font = crate::station::font();
         for (id, fc, col) in &self.faces {
@@ -220,7 +260,12 @@ mod tests {
             frame_scan_id: Some("s1".into()),
             stations: vec![st(1, 0.0, "confirmed", true), st(2, 3.0, "doubtful", true), st(3, 0.0, "unplaced", false)],
             pairs: vec![],
-            walls: vec![Wall { wall_id: "w1".into(), from: [-1.0, 2.0], to: [4.0, 2.0], length_m: 5.0, z_m: [-1.5, 1.2], seen_by: vec![1, 2] }],
+            walls: vec![
+                Wall { wall_id: "w1".into(), from: [-1.0, 2.0], to: [4.0, 2.0], length_m: 5.0, z_m: [-1.5, 1.2], seen_by: vec![1, 2],
+                       kind: "building".into(), flatness: 0.9, height_m: Some(2.7) },
+                Wall { wall_id: "w2".into(), from: [-1.0, 1.5], to: [4.0, 1.5], length_m: 5.0, z_m: [-1.5, 0.0], seen_by: vec![1],
+                       kind: "vegetation".into(), flatness: 0.2, height_m: Some(1.5) },
+            ],
             summary: String::new(),
             updated_at: String::new(),
         }
@@ -238,6 +283,8 @@ mod tests {
         assert!(svg.contains(">2?</text>") && svg.contains(">1</text>"), "numbers, amber with ? when not trusted");
         assert!(svg.contains("north&lt;wall&gt;") && !svg.contains("north<wall>"), "text is escaped");
         assert!(svg.contains("grid 1 m"));
+        assert!(svg.contains("1 wall · 1 run of vegetation"), "the title counts each kind");
+        assert!(svg.contains(r#"stroke-dasharray="4 4""#), "vegetation is dashed");
         let png = m.png();
         assert_eq!(&png[1..4], b"PNG");
     }

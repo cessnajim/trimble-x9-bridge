@@ -36,6 +36,10 @@ pub struct WorkResult {
     /// Stations it couldn't decode: (station number, why).
     #[serde(default)]
     pub skipped: Vec<(u16, String)>,
+    /// The scan whose frame is the project's (the largest group's first
+    /// station); the first station when not given.
+    #[serde(default)]
+    pub frame: Option<String>,
 }
 
 type Delivery = Result<(WorkResult, Vec<u8>), String>;

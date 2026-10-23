@@ -112,7 +112,7 @@ impl Worker {
 
     /// The station's 5 cm cloud: from the cache, or fetched and decoded.
     async fn cloud(&self, scan_id: &str) -> anyhow::Result<Cloud> {
-        let path = self.cache.join(format!("{scan_id}.cloud"));
+        let path = self.cache.join(crate::worker::cloud_name(scan_id));
         if let Ok(b) = tokio::fs::read(&path).await {
             if let Ok(c) = Cloud::from_bytes(&b) {
                 return Ok(c);
@@ -170,7 +170,9 @@ impl Worker {
         let (ids2, numbers2) = (ids.clone(), numbers.clone());
         let (result, merged, checks) = tokio::task::spawn_blocking(move || {
             let refs: Vec<&Prepared> = prep.iter().map(|p| p.as_ref()).collect();
-            let (pairs, poses) = register_all(&ids2, &refs, pairs0, &|_, _| {});
+            let (pairs, groups) = register_all(&ids2, &refs, pairs0, &|_, _| {});
+            let poses = groups.poses();
+            let frame = ids2.get(groups.frame()).cloned();
             let names: Vec<String> = numbers2.iter().map(u16::to_string).collect();
             let audits = audit(&ids2, &names, &refs, &poses, &pairs, &mut checks);
             let mut merged = Merged::default();
@@ -180,7 +182,7 @@ impl Worker {
                 }
             }
             let ws = walls(&merged);
-            (WorkResult { pairs, poses, audits, walls: ws, skipped: vec![] }, merged.to_bytes(), checks)
+            (WorkResult { pairs, poses, audits, walls: ws, skipped: vec![], frame }, merged.to_bytes(), checks)
         })
         .await?;
         self.checks = checks;

@@ -358,18 +358,18 @@ async fn register_once(st: &Arc<AppState>, job_id: &str, project_id: &str) -> Re
         update(st, job_id, |r| r.job.phase = Some(p));
     };
     let offered = crate::work::offer(st, job_id, project_id, &stations, &pairs0, &cancelled, &phase).await;
-    let (skipped, pairs, poses, audits, merged, ws, by) = match offered {
+    let (skipped, pairs, poses, audits, merged, ws, frame, by) = match offered {
         Offered::Cancelled => return Err(None),
         Offered::Done(res, bytes, worker) => {
             let merged = Merged::from_bytes(&bytes).map_err(|e| Some(ApiError::invalid(e)))?;
-            (res.skipped, res.pairs, res.poses, res.audits, merged, res.walls, Some(worker))
+            (res.skipped, res.pairs, res.poses, res.audits, merged, res.walls, res.frame, Some(worker))
         }
         other => {
             if let Offered::Failed(why) = other {
                 st.log("check", format!("Registration came back to the bridge: {why}"), "bridge", Some(project_id), &[("job_id", job_id)]);
             }
-            let (skipped, pairs, poses, audits, merged, ws) = register_here(st, job_id, &stations, pairs0).await?;
-            (skipped, pairs, poses, audits, merged, ws, None)
+            let (skipped, pairs, poses, audits, merged, ws, frame) = register_here(st, job_id, &stations, pairs0).await?;
+            (skipped, pairs, poses, audits, merged, ws, frame, None)
         }
     };
     stations.retain(|(n, _)| !skipped.iter().any(|s| s.0 == *n));
@@ -379,7 +379,7 @@ async fn register_once(st: &Arc<AppState>, job_id: &str, project_id: &str) -> Re
     }
     let mut reg = Registration {
         project_id: project_id.to_string(),
-        frame_scan_id: ids.first().cloned(),
+        frame_scan_id: frame.filter(|f| ids.contains(f)).or_else(|| ids.first().cloned()),
         stations: stations.iter().zip(&poses).zip(audits).map(|(((n, id), p), a)| StationPose { scan_id: id.clone(), station: *n, pose: *p, audit: Some(a) }).collect(),
         pairs,
         walls: ws,
@@ -387,6 +387,29 @@ async fn register_once(st: &Arc<AppState>, job_id: &str, project_id: &str) -> Re
         updated_at: now_rfc3339(),
     };
     reg.summarise();
+    // The frame moved to a bigger group: carry the mission's wall faces along,
+    // when the old frame's station is placed in the new one.
+    if let Some(old) = prev.as_ref().and_then(|p| p.frame_scan_id.clone()).filter(|old| Some(old) != reg.frame_scan_id.as_ref()) {
+        if let Some(pose) = reg.stations.iter().find(|s| s.scan_id == old).and_then(|s| s.pose) {
+            let (s, c) = pose.turn_deg.to_radians().sin_cos();
+            let mv = |p: [f64; 2]| [c * p[0] - s * p[1] + pose.xyz_m[0], s * p[0] + c * p[1] + pose.xyz_m[1]];
+            let moved = {
+                let mut inner = st.inner.lock().unwrap();
+                inner.missions.get_mut(project_id).map(|m| {
+                    for t in m.targets.iter_mut() {
+                        if let Some(f) = t.face.as_mut() {
+                            f.from = mv(f.from);
+                            f.to = mv(f.to);
+                        }
+                    }
+                })
+            };
+            if moved.is_some() {
+                st.save_missions();
+            }
+        }
+        st.log("note", format!("The project frame is now station {}'s (the largest group of stations)", reg.frame_station()), "bridge", Some(project_id), &[]);
+    }
     if let Some(path) = st.merged_path(project_id) {
         if let Some(dir) = path.parent() {
             tokio::fs::create_dir_all(dir).await.map_err(|e| Some(ApiError::cache(format!("registration directory: {e}"))))?;
@@ -466,7 +489,25 @@ async fn register_once(st: &Arc<AppState>, job_id: &str, project_id: &str) -> Re
     Ok(serde_json::json!({"project_id": project_id, "stations": reg.stations.len(), "placed": placed, "summary": reg.summary}))
 }
 
-type Registered = (Vec<(u16, String)>, Vec<crate::register::Pair>, Vec<Option<crate::register::Pose>>, Vec<crate::register::Audit>, crate::register::Merged, Vec<crate::register::Wall>);
+type Registered = (
+    Vec<(u16, String)>,
+    Vec<crate::register::Pair>,
+    Vec<Option<crate::register::Pose>>,
+    Vec<crate::register::Audit>,
+    crate::register::Merged,
+    Vec<crate::register::Wall>,
+    Option<String>,
+);
+
+/// A station's cloud on disk, named by the range it was cut at.
+pub fn cloud_name(scan_id: &str) -> String {
+    format!("{scan_id}.r{}t{}.cloud", crate::register::RANGE as u32, crate::register::NEAR_M as u32)
+}
+
+/// The prepared-station cache's budget: `BRIDGE_PREPARED_MB`, default 2048.
+fn prepared_budget() -> usize {
+    std::env::var("BRIDGE_PREPARED_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(2048) << 20
+}
 
 /// Register on the bridge: decode stations not seen before into 5 cm clouds
 /// (kept on disk), then place, audit and merge. Prepared clouds and pair
@@ -480,7 +521,11 @@ async fn register_here(st: &Arc<AppState>, job_id: &str, stations: &[(u16, Strin
     let mut skipped: Vec<(u16, String)> = Vec::new();
     let total = stations.len().max(1);
     for (k, (n, id)) in stations.iter().enumerate() {
-        let path = dir.join(format!("{id}.cloud"));
+        // Clouds cut at an older range are dropped.
+        for old in [format!("{id}.cloud"), format!("{id}.r60.cloud")] {
+            let _ = tokio::fs::remove_file(dir.join(old)).await;
+        }
+        let path = dir.join(cloud_name(id));
         if tokio::fs::try_exists(&path).await.unwrap_or(false) {
             continue;
         }
@@ -530,12 +575,13 @@ async fn register_here(st: &Arc<AppState>, job_id: &str, stations: &[(u16, Strin
     let (st2, job2) = (st.clone(), job_id.to_string());
     let out = tokio::task::spawn_blocking(move || -> Result<_, String> {
         let mut prep: Vec<Arc<Prepared>> = Vec::with_capacity(ids.len());
+        let mut over: Option<usize> = None;
         for id in &ids {
             let cached = st2.prepared.lock().unwrap().get(id).cloned();
             let p = match cached {
                 Some(p) => p,
                 None => {
-                    let bytes = std::fs::read(dir.join(format!("{id}.cloud"))).map_err(|e| format!("station cloud {id}: {e}"))?;
+                    let bytes = std::fs::read(dir.join(cloud_name(id))).map_err(|e| format!("station cloud {id}: {e}"))?;
                     let p = Arc::new(prepare(&Cloud::from_bytes(&bytes)?));
                     st2.prepared.lock().unwrap().insert(id.clone(), p.clone());
                     p
@@ -546,15 +592,23 @@ async fn register_here(st: &Arc<AppState>, job_id: &str, stations: &[(u16, Strin
         // Keep memory to the project at hand once it grows.
         {
             let mut c = st2.prepared.lock().unwrap();
-            if c.len() > 64 {
+            // Over budget: other projects' stations go first.
+            let total = |c: &std::collections::HashMap<String, Arc<Prepared>>| c.values().map(|p| p.approx_bytes()).sum::<usize>();
+            if total(&c) > prepared_budget() {
                 c.retain(|k, _| ids.contains(k));
+            }
+            let mine = total(&c);
+            if mine > prepared_budget() {
+                over = Some(mine >> 20);
             }
         }
         let refs: Vec<&Prepared> = prep.iter().map(|p| p.as_ref()).collect();
         let say = |b: usize, a: usize| {
             update(&st2, &job2, |r| r.job.phase = Some(format!("matching station {} against {}", numbers[b], numbers[a])));
         };
-        let (pairs, poses) = register_all(&ids, &refs, pairs0, &say);
+        let (pairs, groups) = register_all(&ids, &refs, pairs0, &say);
+        let poses = groups.poses();
+        let frame = ids.get(groups.frame()).cloned();
         update(&st2, &job2, |r| r.job.phase = Some("checking".into()));
         let names: Vec<String> = numbers.iter().map(u16::to_string).collect();
         let mut cache = std::mem::take(&mut *st2.audit_cache.lock().unwrap());
@@ -570,11 +624,22 @@ async fn register_here(st: &Arc<AppState>, job_id: &str, stations: &[(u16, Strin
             }
         }
         let ws = walls(&merged);
-        Ok((pairs, poses, audits, merged, ws))
+        Ok((pairs, poses, audits, merged, ws, frame, over))
     })
     .await;
     match out {
-        Ok(Ok((pairs, poses, audits, merged, ws))) => Ok((skipped, pairs, poses, audits, merged, ws)),
+        Ok(Ok((pairs, poses, audits, merged, ws, frame, over))) => {
+            if let Some(mb) = over {
+                st.log(
+                    "check",
+                    format!("This project's stations take {mb} MB prepared, over the {} MB budget (BRIDGE_PREPARED_MB): a laptop worker would take the load off the Pi", prepared_budget() >> 20),
+                    "bridge",
+                    None,
+                    &[("job_id", job_id)],
+                );
+            }
+            Ok((skipped, pairs, poses, audits, merged, ws, frame))
+        }
         Ok(Err(e)) => Err(Some(ApiError::cache(e))),
         Err(e) => Err(Some(ApiError::conflict(e.to_string()))),
     }

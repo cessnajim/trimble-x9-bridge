@@ -917,7 +917,7 @@ every station goes through checks that need no person:
 | Unique | Symmetric or repeated walls | Every coarse guess is refined; a different fit with 80% of the best one's matches is a rival. Free space decides between rivals (one that puts 3% or more of its points where the other station saw straight through, three times the other's, loses); if it can't, the pair is "ambiguous" and is not used |
 | Loops | A wrong pair among right ones | The robust global fit; a pair it leaves more than 10 cm or 0.3° from its own fit is an outlier |
 | Independent | A placement the pairs agree on but the data doesn’t | Against every neighbour it overlaps, under the final poses, it disagrees when a fresh fit with at least 8000 matches moves it more than 15 mm or 0.08°, when more than 5% of its wall points lie where the other saw straight through, when same-facing surfaces sit more than 20 mm apart (median), or when the ground under its tripod is more than 10 cm off. Each check votes among the neighbours it has evidence for |
-| Verdict | | `confirmed`: tied by two or more pairs that count, no check against it; `single`: one tie; `frame`: the only station; `doubtful`: a check finds it off against more than half its neighbours; `ambiguous`: only rival fits; `unplaced` |
+| Verdict | | `confirmed`: tied by two or more pairs that count, no check against it; `single`: one tie; `frame`: the only station; `doubtful`: a check finds it off against more than half its neighbours; `grouped`: tied to stations in a separate group, not yet to the main one; `ambiguous`: only rival fits; `unplaced` |
 
 Only `confirmed`, `single` and `frame` stations count towards wall coverage;
 the plan draws the others amber with a question mark, and the field log says
@@ -928,6 +928,37 @@ doubtful, and the stations around it stay confirmed. `tools/register/bench.sh` i
 on a recorded survey. Unit tests cover a corridor (weakly held), a symmetric
 room (ambiguous), the same room with a partition (the right fit, by free
 space), and a misplaced station among three.
+
+#### Range, groups and wall kinds
+
+Each station is cut at 60 m (points beyond 30 m are kept 1.5 times coarser),
+so stations 20–40 m apart on a large site still share enough to tie. Stations
+form **groups**: a station tied to nothing searches the stations nearest in
+number; a group outside the main one spends a few searches per registration
+trying to join another, alternating the next stations in number with its last
+stations against the first (a walk coming back to its start). The project
+frame is the **largest** group's first station; when the frame moves to a
+bigger group, the mission's wall faces move with it. On a recorded 19-station
+survey of a large site, 4 stations formed their own group until the 19th
+station tied it back to the start; all 19 then confirmed, the pairs agreeing
+within 22 mm.
+
+Walls found in the merged plan have a **kind**: `building` (flat, rising at
+least 2.4 m above the ground near it), `low wall` (flat and lower: garden
+walls, fences) or `vegetation` (rough: hedges and shrubs against a wall,
+trees). Flatness is the share of points within 2 cm of the line, judged for
+the station that sees the run most sharply (so the stations' small
+disagreements and far, noisy views don't count as roughness); the ground
+comes from the lowest level surface in 1 m cells. Each wall carries `kind`,
+`flatness` and `height_m`; the minimap draws building walls bold, low walls
+thin, vegetation dashed green.
+
+The bridge keeps each station prepared in memory (about 15–40 MB each) so a
+new station costs about one station's work. `BRIDGE_PREPARED_MB` (default
+2048) is the budget: other projects' stations are dropped first, and when
+one project alone needs more, the field log says so and suggests a laptop
+worker. On a Raspberry Pi 4 a new station on a large site takes about 10 s to
+decode and 45–50 s to place; decoding a scan briefly needs about 0.9 GB.
 
 Registration runs one at a time per project; a station that lands while one
 runs makes it run once more. Each result is announced as a `registration`
