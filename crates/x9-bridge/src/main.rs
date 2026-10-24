@@ -13,6 +13,7 @@
 //! - `BRIDGE_RECIPES`  recipe directory (`*.toml`), default `$BRIDGE_DATA/recipes`
 
 mod aim;
+mod bench;
 mod export;
 mod files;
 mod map;
@@ -68,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("register") => return register::cli(&args[1..]),
+        Some("bench") => return bench::cli(&args[1..]),
         Some("worker") => return workmode::run(&args[1..]).await,
         _ => {}
     }

@@ -342,9 +342,19 @@ fn sym_eigen(mut a: Vec<f64>, n: usize) -> (Vec<f64>, Vec<f64>) {
     ((0..n).map(|i| a[i * n + i]).collect(), v)
 }
 
-/// Run `f` over `0..n` on all cores, collecting results in order.
+static THREAD_CAP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Use at most `n` threads for registration (0: all cores). The bench sets
+/// it so a measurement doesn't take the whole machine.
+pub fn set_thread_cap(n: usize) {
+    THREAD_CAP.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Run `f` over `0..n` on all cores (or the cap), collecting results in order.
 fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
-    let threads = std::thread::available_parallelism().map(|t| t.get()).unwrap_or(1).min(n.max(1));
+    let cores = std::thread::available_parallelism().map(|t| t.get()).unwrap_or(1);
+    let cap = THREAD_CAP.load(std::sync::atomic::Ordering::Relaxed);
+    let threads = if cap > 0 { cores.min(cap) } else { cores }.min(n.max(1));
     let chunk = n.div_ceil(threads.max(1)).max(1);
     let f = &f;
     std::thread::scope(|s| {

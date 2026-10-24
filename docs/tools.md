@@ -153,6 +153,61 @@ Other behaviour, matching what was observed on a real scanner:
 - Fixture files are chosen by the scan's file name: names with `_` get
   `area.*`, others `dome.*`.
 
+## Registration offline: `x9-bridge register` and `x9-bridge bench`
+
+Both read recorded stations (`.tzf` files) and run the same registration
+the bridge runs on site, one station more each time, then the audit.
+
+```bash
+x9-bridge register [--perturb N:dx,dy,deg] [--truth poses.json] OUT_DIR station_*.tzf
+```
+
+`register` writes `poses.json`, `pairs.json`, `audit.json`, `walls.json`, a
+plan and a minimap to `OUT_DIR`, and prints each station's verdict and
+checks. `--perturb` moves a station after the solve (a planted error the
+audit should catch); `--truth` reports each station's distance from known
+poses.
+
+```bash
+x9-bridge bench [--truth poses.json] [--orders N] [--plant N:dx,dy,deg]… [--no-plants] \
+  [--threads T] [--json OUT.json] [--scoreboard FILE] [--label TEXT] SURVEY_DIR
+```
+
+`bench` tells whether a change to registration is better. The registration
+is deterministic (the same files in the same order give the same poses), so
+what varies on site is the input. The bench keeps the scans fixed and varies
+the rest on purpose:
+
+- **Orders:** the stations in the given order, reversed, and seeded shuffles
+  (`--orders`, default 4). Each order is a separate on-site story: different
+  stations exist when each one is placed, and groups form and join
+  differently.
+- **Planted errors:** on the given order's result, a station is moved and the
+  audit is run again. By default three stations (the second, the middle, the
+  last) are each moved 3 cm, 30 cm and 1°; `--plant` sets your own.
+
+Each result is scored by what the mistake costs, against `--truth` (by
+default the given order's own solve; a placement within 30 mm and 0.1° is
+right):
+
+| | |
+| --- | --- |
+| **Wrong accepts** | Trusted but wrong, or a planted error not caught. The person has already left, so this is the costly one. The bench **fails** on any. |
+| **Wrong rejects** | Right but not trusted, or a good station flagged because of a planted one: a re-scan or a question. |
+| **Unplaced** | Stations no order could place. |
+| **Error** | Median and worst distance of trusted stations from the reference. |
+| **Time, memory** | Solve time per order, and the run's peak memory. |
+
+To compare two builds, run both on the same surveys with the same options;
+the survey's fingerprint (station count and a hash of names and sizes) is in
+the report, so scores are only compared on the same set. `--scoreboard`
+appends one line per run to a file, to see a slow drift over many changes.
+
+It is gentle on the machine: each station is decoded and prepared once,
+cases run one after another, it uses `--threads` threads (default a quarter
+of the cores, at most 8), and it won't start with less than about 3 GB of
+memory free. On a shared machine, run it under `nice -n 19 ionice -c3`.
+
 ## Tests
 
 ### Unit tests
